@@ -1,0 +1,75 @@
+[project]
+name = "teehr-icechunk"
+version = "0.0.1"
+description = "Build, update and read analysis-ready Icechunk datasets of hydrologic and weather data, plus zonal statistics."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+authors = [{ name = "RTI International" }]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Hydrology",
+]
+# No Prefect, teehr or Spark here; formats and orchestrators are extras.
+dependencies = [
+    "icechunk>=2.1.2,<2.2",
+    # xarray 2026.9 breaks icechunk 2.1's to_icechunk (it passes the removed `synchronizer` argument)
+    "xarray<2026.9",
+    "zarr>=3.1,<4",
+    "numpy>=2.2",
+    # The client images run pandas 2 (through teehr); pandas 3 is untested
+    "pandas>=2.2,<3",
+    "obstore>=0.11,<0.12",
+    "pydantic>=2.11",
+    "pyproj>=3.7",
+    # CRS handling while writing GeoZarr attributes; to be replaced by pyproj + affine
+    "rioxarray>=0.23",
+    # Virtual references are still written through VirtualiZarr's ManifestArray; moves to the
+    # format extras once references are written through Icechunk directly
+    "virtualizarr>=2.7.1,<2.8",
+    "obspec-utils>=0.9",
+]
+
+[project.optional-dependencies]
+# Building references from HDF5/NetCDF4 (and Zarr) sources.
+hdf = ["h5py>=3.12"]
+# Building references from GeoTIFF sources, and reading virtual TIFF chunks.
+tiff = ["virtual-tiff>=0.5,<0.6"]
+# Building and reading GRIB2-backed datasets.
+grib = ["gribberish>=1.8,<2"]
+# Zonal statistics (mean areal values).
+mean-areal = ["scipy>=1.14", "pyarrow>=21"]
+all = ["teehr-icechunk[hdf,tiff,grib,mean-areal]"]
+
+[project.urls]
+Repository = "https://github.com/RTIInternational/teehr-icechunk"
+
+[dependency-groups]
+dev = [
+    "cf-xarray>=0.10",  # readers such as xpublish-edr find the time axis with it
+    "cloudpickle>=3",  # the mean areal kernel is shipped to Spark executors by value
+    "h5netcdf>=1.4",  # tests write small netCDF sources
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/teehr_icechunk"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# Code moved from the client repos keeps its formatting for now; tighten after the move.
+select = ["E", "F", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]
