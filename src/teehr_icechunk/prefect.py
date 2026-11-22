@@ -4,6 +4,7 @@ The parent flow plans the units and calls ``PrefectRunner.run``, which starts on
 deployment per unit (at most ``max_parallel`` at a time) and waits for them. The child flow, defined in each
 client so its parameters validate against the client's sources, calls ``run_unit``.
 """
+import contextvars
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -48,7 +49,9 @@ class PrefectRunner:
 
         logger.info(f"Running {len(units)} unit(s) as runs of {self.deployment}, {self.max_parallel} at a time.")
         with ThreadPoolExecutor(min(self.max_parallel, max(1, len(units)))) as pool:
-            results = list(pool.map(run_one, units))
+            # Each thread runs in a copy of this context, so the children are subflows of the calling flow run
+            futures = [pool.submit(contextvars.copy_context().run, run_one, unit) for unit in units]
+            results = [f.result() for f in futures]
         failed = sum(r.error is not None for r in results)
         logger.info(f"{len(results) - failed} of {len(results)} unit(s) succeeded.")
         return results
