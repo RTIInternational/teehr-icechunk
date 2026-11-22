@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: uv sync --locked --all-extras
+      - name: Lint
+        run: uv run ruff check .
+      - name: Test
+        run: uv run pytest
+
+  base-install:
+    # The base install must work without any extra, and never pull in an orchestrator, teehr or Spark.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install
+        run: uv sync --locked --no-dev
+      - name: Import the core modules
+        run: |
+          uv run python - <<'EOF'
+          import importlib, sys
+          core = ["repo_const", "data_status", "packed_encoding", "concurrency", "time_grid", "grid_spec",
+                  "grid_utils", "sources", "models", "ingest", "overviews"]
+          for name in core:
+              importlib.import_module(f"teehr_icechunk.{name}")
+          leaked = sorted({m.split(".")[0] for m in sys.modules} & {"prefect", "teehr", "pyspark"})
+          assert not leaked, f"the base install imported {leaked}"
+          EOF
