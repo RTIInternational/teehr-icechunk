@@ -196,3 +196,23 @@ def test_grid_attrs_and_off_grid_timestamps(repo):
         tg.check_on_grid(pd.DatetimeIndex(["1981-10-05T12:00"]), ORIGIN, STEP)
     with pytest.raises(ValueError):
         tg.check_on_grid(pd.DatetimeIndex(["1981-09-30"]), ORIGIN, STEP)
+
+
+def test_write_step_metadata_records_only_the_given_steps(repo, source):
+    """The run model's parent records steps the children wrote; created_at survives a rewrite."""
+    _, _, open_days = source
+    session = repo.writable_session("main")
+    tg.create_group(session, "references", open_days(DAYS[:2]), ORIGIN, STEP, DIM, DAYS[29], virtual=True)
+    tg.write_step_metadata(session, "references", DIM, DAYS[3:6], [2, 1, 2], np.full(3, MODIFIED), tg.utc_now())
+    first = tg.read_step_metadata(session.store, "references", DIM)
+    assert first.status.loc[DAYS[3:6]].tolist() == [2, 1, 2]
+    assert (first.status.drop(DAYS[3:6]) == tg.UNWRITTEN).all()
+    assert first.created_at.loc[DAYS[3:6]].notna().all() and first.created_at.drop(DAYS[3:6]).isna().all()
+
+    later = np.datetime64("2030-01-01", "ms")
+    tg.write_step_metadata(session, "references", DIM, DAYS[4:5], [2], [MODIFIED], later)
+    second = tg.read_step_metadata(session.store, "references", DIM)
+    assert second.status.loc[DAYS[4]] == 2 and second.updated_at.loc[DAYS[4]] == later
+    assert second.created_at.loc[DAYS[4]] == first.created_at.loc[DAYS[4]]
+    with pytest.raises(ValueError, match="not slots"):
+        tg.write_step_metadata(session, "references", DIM, pd.DatetimeIndex([DAYS[29] + STEP]), [2], [MODIFIED], later)

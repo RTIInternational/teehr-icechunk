@@ -25,6 +25,7 @@ from teehr_icechunk.repo_const import (
     GRID_ATTRS,
     GRID_NAME_ATTR,
     LEAD_TIME,
+    NOT_EXPECTED,
     REFERENCE_TIME,
     FORECAST_STATUS_ATTRS,
     STATUS_ATTRS,
@@ -358,6 +359,63 @@ def with_step_metadata(
     return ds.assign_coords(coords)
 
 
+def write_step_metadata(
+    session: ic.Session,
+    group: str,
+    dim: str,
+    steps: pd.Index,
+    status: np.ndarray,
+    source_last_modified: np.ndarray,
+    updated_at: np.ndarray | np.datetime64,
+) -> None:
+    """Record steps as written: status and audit times into ``group``'s per-step coordinates.
+
+    ``steps`` are times, or forecast steps (``dim``, *fixed axes); ``created_at`` is kept where already set.
+    Only the block of cycles the steps span is read and written back, so memory follows the steps, not the
+    repo. Writers that commit chunks concurrently never call this: one writer records metadata for all.
+    """
+    g = zarr.open_group(session.store, path=group.strip("/"), mode="a", zarr_format=3)
+    step_dims = tuple(g[STATUS_COORD].metadata.dimension_names)
+    axes = [xr.open_zarr(session.store, group=group, consolidated=False, chunks=None)[d].to_index() for d in step_dims]
+    levels = [steps] if len(step_dims) == 1 else [steps.get_level_values(d) for d in step_dims]
+    pos = [axis.get_indexer(level) for axis, level in zip(axes, levels)]
+    if any((p < 0).any() for p in pos):
+        raise ValueError(f"Some steps are not slots of {group}.")
+    lo, hi = int(pos[0].min()), int(pos[0].max()) + 1
+    at = (pos[0] - lo, *pos[1:])
+    now = utc_now().astype("int64")
+    encoded = {
+        STATUS_COORD: np.asarray(status, "int8"),
+        "source_last_modified": np.asarray(source_last_modified, "datetime64[ms]").astype("int64"),
+        "updated_at": np.broadcast_to(np.asarray(updated_at, "datetime64[ms]").astype("int64"), len(steps)),
+    }
+    for name, values in (*encoded.items(), ("created_at", None)):
+        block = g[name][lo:hi]
+        if values is None:  # first write of a step
+            values = np.where(block[at] == _NAT_INT, now, block[at])
+        block[at] = values
+        g[name][lo:hi] = block
+
+
+def mark_not_expected(session: ic.Session, group: str, dim: str, expected: np.ndarray) -> int:
+    """Mark unwritten slots the source never publishes as ``NOT_EXPECTED``; returns how many changed.
+
+    ``expected`` is shaped like the group's ``status`` (cycles, *fixed axes). Only the block of cycles that
+    changes is written back.
+    """
+    status = zarr.open_group(session.store, path=group.strip("/"), mode="a", zarr_format=3)[STATUS_COORD]
+    current = status[...]
+    change = (current == UNWRITTEN) & ~np.asarray(expected, bool)
+    rows = np.flatnonzero(change.reshape(len(current), -1).any(axis=1))
+    if len(rows) == 0:
+        return 0
+    lo, hi = int(rows[0]), int(rows[-1]) + 1
+    block = current[lo:hi]
+    block[change[lo:hi]] = NOT_EXPECTED
+    status[lo:hi] = block
+    return int(change.sum())
+
+
 def region_write(
     session: ic.Session, group: str, ds: xr.Dataset, dim: str, virtual: bool = False, fixed_dims: tuple[str, ...] = ()
 ) -> None:
@@ -404,7 +462,9 @@ def select_source_steps(listing: pd.DataFrame, stored: pd.DataFrame | None, mode
         return listing[unwritten.to_numpy()]
     rank = listing[STATUS_COORD].map(STATUS_MEANINGS.index)
     more_final = rank.to_numpy() > st[STATUS_COORD].fillna(UNWRITTEN).to_numpy()
-    newer = (listing["last_modified"] > st["source_last_modified"]).fillna(False).to_numpy()
+    # Compared at the stored precision (ms), so a finer listed time doesn't read as newer
+    listed = pd.to_datetime(listing["last_modified"]).dt.floor("ms")
+    newer = (listed > st["source_last_modified"]).fillna(False).to_numpy()
     return listing[unwritten.to_numpy() | more_final | newer]
 
 
