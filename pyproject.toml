@@ -41,7 +41,7 @@ grib = ["gribberish>=1.8,<2"]
 # Zonal statistics (mean areal values).
 mean-areal = ["scipy>=1.14", "pyarrow>=21"]
 # Fan-out of units as Prefect child flow runs (teehr_icechunk.prefect).
-prefect = ["prefect>=3.4,<3.5"]
+prefect = ["prefect>=3.4,<4"]
 all = ["teehr-icechunk[hdf,tiff,grib,mean-areal]"]
 
 [project.urls]
