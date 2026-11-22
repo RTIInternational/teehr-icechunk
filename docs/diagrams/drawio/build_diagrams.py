@@ -84,7 +84,50 @@ def repo_layout():
     return p
 
 
-PAGES = [package_boundaries, repo_layout]
+def gridded_workflow():
+    p = Page("Gridded workflow", 1500, 640)
+    p.box("src", tb("Source files", "HDF5 / NetCDF, GeoTIFF, GRIB2 + .idx"), EXT, 20, 60, 180, 80)
+    p.box("list", tb("List and select", "Source listing by step; append / upsert against the stored step metadata"), ICECHUNK, 240, 60, 200, 80)
+    p.box("prep", tb("Prepare (parent)", "Groups, axes and root attributes; NOT_EXPECTED slots; one commit"), ICECHUNK, 480, 60, 200, 80)
+    p.box("plan", tb("Plan units", "Whole shards and manifest splits along the append axis"), ICECHUNK, 720, 60, 200, 80)
+    p.box("run", tb("Runner", "In-process (daily runs) or Prefect child runs (backfills)"), ICECHUNK, 960, 60, 200, 80)
+    p.box("meta", tb("Record steps (parent)", "Status and audit times of the units that succeeded; one commit"), ICECHUNK, 1200, 60, 260, 80)
+    for i, (a, b) in enumerate((("src", "list"), ("list", "prep"), ("prep", "plan"), ("plan", "run"), ("run", "meta"))):
+        p.edge(f"e-flow{i}", a, b)
+    p.group("grp-unit", "A unit's stages (each writes chunks only and commits with rebase)", 240, 200, 920, 150)
+    p.box("refs", tb("/references", "IndexSource: refs from .idx files; parsed sources: VirtualiZarr parsers; written with set_virtual_refs"), STORE, 270, 230, 260, 100)
+    p.box("data", tb("/data (optional)", "Materialized copy, rechunked and sharded"), STORE, 580, 230, 240, 100)
+    p.box("ov", tb("/overviews/&lt;factor&gt;", "Block means for zoomed-out tiles"), STORE, 870, 230, 260, 100)
+    p.edge("e-rd", "refs", "data")
+    p.edge("e-do", "data", "ov")
+    p.edge("e-run-unit", "run", "grp-unit", "runs", "exitX=0.5;exitY=1;entryX=0.9;entryY=0;")
+    p.box("readers", tb("Readers", "open_grid_dataset (ours or external repos), xpublish tiles / EDR, zonal statistics → Arrow batches"), EXT, 240, 420, 920, 70)
+    p.edge("e-read", "grp-unit", "readers", "", "exitX=0.5;exitY=1;entryX=0.5;entryY=0;")
+    p.box("note", "Today index sources (GEFS) run on units; parsed sources (NWM forcing, snow) keep the earlier path until their stages move over", NOTE, 240, 520, 920, 40)
+    p.legend(1240, 230, [(ICECHUNK, "teehr-icechunk step"), (STORE, "Repo group"), (EXT, "External")], width=220)
+    return p
+
+
+def run_model():
+    p = Page("Run model and fan-out", 1300, 640)
+    p.box("parent", tb("Parent flow run", "List, select, prepare (one commit), plan units"), ICECHUNK, 40, 60, 260, 90)
+    p.box("prefect", tb("PrefectRunner ([prefect] extra)", "Backfills: one child run per unit via run_deployment, at most max_child_runs at a time"), ICECHUNK, 380, 50, 280, 90)
+    p.box("inproc", tb("In-process runner", "Daily runs: units one after another in the parent's pod"), ICECHUNK, 380, 200, 280, 80)
+    p.group("grp-children", "Child runs (process-gridded-unit), one pod each", 740, 30, 500, 300)
+    for i, y in enumerate((70, 160, 250)):
+        p.box(f"child{i}", tb(f"Unit {i + 1}", "Writes its chunks, commits with rebase over the other units"), CLIENT, 770, y, 440, 60)
+        p.edge(f"e-pf-c{i}", "prefect", f"child{i}", "", f"exitX=1;exitY={0.3 + 0.2 * i};entryX=0;entryY=0.5;")
+    p.box("repo", tb("Icechunk repo", "Units never share a chunk or manifest split; only the parent writes step metadata"), STORE, 380, 430, 330, 110)
+    p.box("record", tb("Parent records steps", "For units that succeeded; failed units stay unwritten and the next run retries them"), ICECHUNK, 40, 430, 220, 110)
+    p.edge("e-p-pf", "parent", "prefect", "", "exitX=1;exitY=0.4;entryX=0;entryY=0.5;")
+    p.edge("e-p-in", "parent", "inproc", "", "exitX=1;exitY=0.8;entryX=0;entryY=0.5;")
+    p.edge("e-in-repo", "inproc", "repo", "chunk commits", "exitX=0.5;exitY=1;entryX=0.3;entryY=0;")
+    p.edge("e-c-repo", "grp-children", "repo", "chunk commits", "exitX=0.5;exitY=1;entryX=1;entryY=0.5;", points=((990, 485),))
+    p.edge("e-p-rec", "parent", "record", "after the units", "exitX=0.5;exitY=1;entryX=0.5;entryY=0;")
+    p.edge("e-rec", "record", "repo", "metadata commit")
+    return p
+
+PAGES = [package_boundaries, repo_layout, gridded_workflow, run_model]
 
 if __name__ == "__main__":
     write_drawio(OUTPUT, [build() for build in PAGES])
