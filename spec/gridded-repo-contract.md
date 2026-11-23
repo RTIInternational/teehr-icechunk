@@ -69,6 +69,18 @@ Besides `units` and `long_name`, each variable says how its values relate to tim
 
 For example, GEFS APCP at 0.25 degrees (`time: sum`, reset 6) covers 3 h at leads 3, 9, ... and 6 h at leads 6, 12, .... Readers that name or combine values by the hours they cover (`grid_spec.window_hours`) use these; a variable without them covers the hours since the lead before it.
 
+## Spatial metadata
+
+Each group and its gridded variables carry CF and GeoZarr metadata, written when the repo is created:
+
+| Where | Attributes |
+|---|---|
+| Grid mapping coordinate (`spatial_ref` or the source's, e.g. `crs`) | CF grid mapping parameters, `crs_wkt` |
+| Each gridded variable | `grid_mapping`, `proj:wkt2`, `proj:code` (EPSG CRSs only), `spatial:dimensions` (`[y, x]`), `standard_name` where known |
+| Each group | `proj:wkt2`, `proj:code`, `spatial:dimensions`, `spatial:transform` (regular grids: pixel size and the outer corner of the first pixel), `Conventions` |
+
+Overview levels carry their own `spatial:transform`.
+
 ## Time grid and per-step status
 
 The append axis has a slot for every step from `time_origin`, whether written or not. Slots not yet

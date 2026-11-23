@@ -54,14 +54,18 @@ class GefsVariable:
     step_type: Literal["instant", "acc", "ave", "max", "min"]
     units: str
     long_name: str
+    standard_name: str  # CF
 
 
 # Single-level variables, named <ELEMENT>_<level>; more come with add-variables runs
 CATALOG: dict[str, GefsVariable] = {
-    "APCP_surface": GefsVariable("apcp_sfc", "APCP", "surface", "acc", "kg m-2", "Total precipitation"),
-    "TMP_2m": GefsVariable("tmp_2m", "TMP", "2 m above ground", "instant", "K", "Temperature at 2 m"),
-    "TMAX_2m": GefsVariable("tmax_2m", "TMAX", "2 m above ground", "max", "K", "Maximum temperature at 2 m"),
-    "TMIN_2m": GefsVariable("tmin_2m", "TMIN", "2 m above ground", "min", "K", "Minimum temperature at 2 m"),
+    "APCP_surface": GefsVariable("apcp_sfc", "APCP", "surface", "acc", "kg m-2", "Total precipitation",
+                                 "precipitation_amount"),
+    "TMP_2m": GefsVariable("tmp_2m", "TMP", "2 m above ground", "instant", "K", "Temperature at 2 m", "air_temperature"),
+    "TMAX_2m": GefsVariable("tmax_2m", "TMAX", "2 m above ground", "max", "K", "Maximum temperature at 2 m",
+                            "air_temperature"),
+    "TMIN_2m": GefsVariable("tmin_2m", "TMIN", "2 m above ground", "min", "K", "Minimum temperature at 2 m",
+                            "air_temperature"),
 }
 
 # grid -> (degrees, (n_lat, n_lon))
@@ -240,7 +244,8 @@ class GEFSv12Reforecast(IndexSource):
                 dimension_names=dims,
             )
             empty = ManifestArray(metadata=metadata, chunkmanifest=ChunkManifest(entries={}, shape=(1, len(members), len(leads), 1, 1)))
-            attrs = {"units": var.units, "long_name": var.long_name, "grib_element": var.element, "grib_level": var.level,
+            attrs = {"units": var.units, "long_name": var.long_name, "standard_name": var.standard_name,
+                     "grib_element": var.element, "grib_level": var.level,
                      CELL_METHODS_ATTR: f"time: {CF_TIME_METHODS[var.step_type]}"}
             if var.step_type != "instant":
                 attrs[WINDOW_RESET_HOURS_ATTR] = WINDOW_RESET_HOURS
