@@ -21,7 +21,10 @@ from teehr_icechunk.repo_const import (
     GRID_NAME_ATTR,
     LAYOUT_VERSION_ATTR,
     LEAD_TIME,
+    STEP_TYPE_ATTR,
     VALUE_TIME,
+    WINDOW_RESET_HOURS_ATTR,
+    WINDOWED_STEP_TYPES,
 )
 
 # On-disk layouts these readers understand: 1 is the analysis time grid (also when the attribute is
@@ -72,3 +75,28 @@ def open_grid_dataset(store: ic.IcechunkStore, spec: GridSpec) -> xr.Dataset:
         ds = ds.assign_coords({VALUE_TIME: ((dim, lead), tg.value_times(ds[dim].values, ds[lead].values),
                                                FORECAST_COORD_ATTRS[VALUE_TIME])})
     return ds
+
+
+def window_start(lead_hours: int, reset_hours: int | None) -> int:
+    """The hour after the cycle that a window ending at ``lead_hours`` starts: the last multiple of
+    ``reset_hours`` before it, or 0 (the cycle) when windows never reset (``reset_hours`` None or 0)."""
+    return (lead_hours - 1) // reset_hours * reset_hours if reset_hours else 0
+
+
+def window_hours(leads, attrs: dict) -> dict[int, int]:
+    """The hours each lead's value covers, from its variable's attributes; leads covering none (lead 0) are left out.
+
+    A windowed variable (``step_type`` acc, ave, max or min, with ``window_reset_hours``) covers the hours since its
+    window started: GEFS APCP at 0.25 degrees covers 3 h at leads 3, 9, ... and 6 h at leads 6, 12, ....
+    ``window_reset_hours`` 0 means windows never reset, so each value covers the hours since the cycle.
+    Anything else covers the hours since the lead before it (the first lead's, since 0).
+    """
+    windowed = attrs.get(STEP_TYPE_ATTR) in WINDOWED_STEP_TYPES and WINDOW_RESET_HOURS_ATTR in attrs
+    reset = int(attrs[WINDOW_RESET_HOURS_ATTR]) if windowed else None
+    hours, previous = {}, 0
+    for lead in (int(x) for x in leads):
+        covered = lead - (window_start(lead, reset) if windowed else previous)
+        previous = lead
+        if covered > 0:
+            hours[lead] = covered
+    return hours

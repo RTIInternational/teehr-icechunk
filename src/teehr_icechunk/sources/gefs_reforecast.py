@@ -26,7 +26,9 @@ from obstore.store import S3Store
 from pydantic import Field, field_validator
 
 from teehr_icechunk.grib_index import StaleIndexError, check_last_message, message_ranges, parse_index, window
-from teehr_icechunk.repo_const import LEAD_TIME, MEMBER, REFERENCE_TIME, STATUS_COORD
+from teehr_icechunk.repo_const import (
+    LEAD_TIME, MEMBER, REFERENCE_TIME, STATUS_COORD, STEP_TYPE_ATTR, WINDOW_RESET_HOURS_ATTR,
+)
 from teehr_icechunk.sources import IndexSource, listing_frame
 
 logger = logging.getLogger(__name__)
@@ -237,9 +239,9 @@ class GEFSv12Reforecast(IndexSource):
             )
             empty = ManifestArray(metadata=metadata, chunkmanifest=ChunkManifest(entries={}, shape=(1, len(members), len(leads), 1, 1)))
             attrs = {"units": var.units, "long_name": var.long_name, "grib_element": var.element, "grib_level": var.level,
-                     "step_type": var.step_type}
+                     STEP_TYPE_ATTR: var.step_type}
             if var.step_type != "instant":
-                attrs["window_reset_hours"] = WINDOW_RESET_HOURS
+                attrs[WINDOW_RESET_HOURS_ATTR] = WINDOW_RESET_HOURS
             data_vars[name] = (dims, empty, attrs)
         coords = {
             REFERENCE_TIME: [self.time_origin()], MEMBER: np.array(members, "int32"), LEAD_TIME: np.array(leads, "int32"),

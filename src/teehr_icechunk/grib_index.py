@@ -9,6 +9,8 @@ BSD-3-Clause, Copyright (c) 2026, dynamical-org.
 """
 from dataclasses import dataclass
 
+from teehr_icechunk.grid_spec import window_start
+
 
 class StaleIndexError(ValueError):
     """The index doesn't describe the data file it sits beside."""
@@ -74,5 +76,5 @@ def window(lead_hours: int, step_type: str, reset_hours: int | None = None) -> s
     """
     if step_type == "instant":
         return f"{lead_hours} hour fcst"
-    since = 0 if reset_hours is None else (lead_hours - 1) // reset_hours * reset_hours
+    since = window_start(lead_hours, reset_hours)
     return f"{since}-{lead_hours} hour {step_type} fcst"
