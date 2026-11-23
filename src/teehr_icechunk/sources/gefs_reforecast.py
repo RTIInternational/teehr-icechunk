@@ -27,7 +27,7 @@ from pydantic import Field, field_validator
 
 from teehr_icechunk.grib_index import StaleIndexError, check_last_message, message_ranges, parse_index, window
 from teehr_icechunk.repo_const import (
-    LEAD_TIME, MEMBER, REFERENCE_TIME, STATUS_COORD, STEP_TYPE_ATTR, WINDOW_RESET_HOURS_ATTR,
+    CELL_METHODS_ATTR, LEAD_TIME, MEMBER, REFERENCE_TIME, STATUS_COORD, WINDOW_RESET_HOURS_ATTR,
 )
 from teehr_icechunk.sources import IndexSource, listing_frame
 
@@ -39,6 +39,8 @@ PREFIX = "GEFSv12/reforecast"
 IO_THREADS = 64
 # Messages reset their windows at multiples of this many hours
 WINDOW_RESET_HOURS = 6
+# The CF cell_methods (along time) of each GRIB step type; arrays carry these, the index labels the step type
+CF_TIME_METHODS = {"instant": "point", "acc": "sum", "ave": "mean", "max": "maximum", "min": "minimum"}
 WEDNESDAY = 2
 
 
@@ -239,7 +241,7 @@ class GEFSv12Reforecast(IndexSource):
             )
             empty = ManifestArray(metadata=metadata, chunkmanifest=ChunkManifest(entries={}, shape=(1, len(members), len(leads), 1, 1)))
             attrs = {"units": var.units, "long_name": var.long_name, "grib_element": var.element, "grib_level": var.level,
-                     STEP_TYPE_ATTR: var.step_type}
+                     CELL_METHODS_ATTR: f"time: {CF_TIME_METHODS[var.step_type]}"}
             if var.step_type != "instant":
                 attrs[WINDOW_RESET_HOURS_ATTR] = WINDOW_RESET_HOURS
             data_vars[name] = (dims, empty, attrs)

@@ -60,14 +60,14 @@ forecast on the same grid line up with `analysis.sel(time=forecast.value_time)`.
 
 ## Variable attributes
 
-Besides `units` and `long_name`, a forecast variable whose values cover a window ending at the lead (rather than an instant) says so:
+Besides `units` and `long_name`, each variable says how its values relate to time, following CF. Windows that restart during a forecast (GEFS: every 6 h, so 3 h and 6 h windows alternate) have no CF form, so a windowed variable also gives `window_reset_hours`:
 
 | Attribute | Values | Meaning |
 |---|---|---|
-| `step_type` | `instant`, `acc`, `ave`, `max`, `min` | How each value relates to time (GRIB2's step type): an instant, or the accumulation, average, maximum or minimum over a window ending at the lead |
+| `cell_methods` | CF, e.g. `time: point`, `time: sum`, `time: mean`, `time: maximum`, `time: minimum` | How each value relates to time: an instant, or the sum, mean, maximum or minimum over a window ending at the lead |
 | `window_reset_hours` | integer hours, e.g. 6, or 0 | Windowed variables only: windows restart at multiples of this many hours after the cycle, so each covers the hours since the last multiple before its lead; 0 means they never restart, so each covers the hours since the cycle (e.g. an accumulation from the cycle) |
 
-For example, GEFS APCP at 0.25 degrees (`acc`, reset 6) covers 3 h at leads 3, 9, ... and 6 h at leads 6, 12, .... Readers that name or combine values by the hours they cover (`grid_spec.window_hours`) use these; a variable without them covers the hours since the lead before it.
+For example, GEFS APCP at 0.25 degrees (`time: sum`, reset 6) covers 3 h at leads 3, 9, ... and 6 h at leads 6, 12, .... Readers that name or combine values by the hours they cover (`grid_spec.window_hours`) use these; a variable without them covers the hours since the lead before it.
 
 ## Time grid and per-step status
 
