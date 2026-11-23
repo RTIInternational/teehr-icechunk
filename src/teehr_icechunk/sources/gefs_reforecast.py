@@ -3,7 +3,7 @@
 Cycles are daily at 00Z with members c00 and p01-p04; once a week (Wednesdays) p05-p10 too, and the run
 extends to 35 days. Each GRIB2 file holds one variable at every lead, with a ``.idx`` beside it. Days 1-10
 are 3-hourly on a 0.25 degree grid; beyond day 10, 6-hourly on 0.5 degrees. So there are two repos, one per
-grid: ``0p25`` (leads 3-240 h) and ``0p5`` (leads 3-840 h, of which 3-240 h hold only the pressure levels
+grid: ``0p25`` (leads 3-240 h) and ``0p50`` (leads 3-840 h, of which 3-240 h hold only the pressure levels
 above 700 hPa).
 
 Each message is one chunk, decoded by the gribberish codec (the ``[grib]`` extra) at read time.
@@ -69,7 +69,7 @@ CATALOG: dict[str, GefsVariable] = {
 }
 
 # grid -> (degrees, (n_lat, n_lon))
-GRIDS = {"0p25": (0.25, (721, 1440)), "0p5": (0.5, (361, 720))}
+GRIDS = {"0p25": (0.25, (721, 1440)), "0p50": (0.5, (361, 720))}
 _FILE_PATTERN = re.compile(
     rf"^{PREFIX}/(\d{{4}})/(\d{{10}})/(c00|p\d\d)/(Days:1-10|Days:10-16|Days:10-35)/([a-z0-9_]+)_\2_\3\.grib2$"
 )
@@ -90,7 +90,7 @@ class GEFSv12Reforecast(IndexSource):
     """GEFS v12 reforecast cycles, members 0-10, one repo per grid."""
 
     type: Literal["gefs-v12-reforecast"] = "gefs-v12-reforecast"
-    grid: Literal["0p25", "0p5"] = Field(..., description="0p25: days 1-10 at 0.25 degrees; 0p5: up to 35 days at 0.5")
+    grid: Literal["0p25", "0p50"] = Field(..., description="0p25: days 1-10 at 0.25 degrees; 0p50: up to 35 days at 0.5")
     variables: list[str] = Field(
         default=["APCP_surface", "TMAX_2m", "TMIN_2m"],
         description="Variables to reference, from CATALOG (more can be added later, e.g. TMP_2m)",

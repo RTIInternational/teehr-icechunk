@@ -11,7 +11,7 @@ def test_windowed_alternates_3_and_6_hours_at_0p25():
     assert window_hours(range(3, 241, 3), {"cell_methods": "time: maximum", "window_reset_hours": 6}) == hours
 
 
-def test_windowed_is_6_hours_at_0p5():
+def test_windowed_is_6_hours_at_0p50():
     assert set(window_hours(range(246, 841, 6), APCP).values()) == {6}
 
 
