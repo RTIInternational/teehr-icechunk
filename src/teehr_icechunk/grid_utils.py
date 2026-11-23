@@ -499,8 +499,9 @@ def standardize_and_inject_geozarr(
     Resolves spatial dimensions and CRS, then writes:
     - A scalar ``spatial_ref`` coordinate with CF grid mapping attrs and WKT strings.
     - CF axis/standard_name attrs on the x/y coordinate variables.
-    - ``grid_mapping``, ``proj:wkt2``, and ``spatial:dimensions`` on each spatial data var.
-    - ``proj:wkt2``, ``spatial:dimensions``, and ``Conventions`` on the dataset itself.
+    - ``grid_mapping``, ``proj:wkt2`` (and ``proj:code`` for an EPSG CRS), and ``spatial:dimensions`` on each
+      spatial data var.
+    - The same, plus ``spatial:transform`` (regular grids) and ``Conventions``, on the dataset itself.
     """
 
     # --- Resolve spatial dimensions ---
@@ -582,14 +583,18 @@ def standardize_and_inject_geozarr(
         ds.attrs["Conventions"] = "CF-1.11"
     elif "CF-" not in str(conventions):
         ds.attrs["Conventions"] = f"{conventions} CF-1.11"
-    ds.attrs["proj:wkt2"] = wkt_string
+    epsg = pyproj_crs.to_epsg()
+    proj = {"proj:wkt2": wkt_string, **({"proj:code": f"EPSG:{epsg}"} if epsg else {})}
+    ds.attrs.update(proj)
     ds.attrs["spatial:dimensions"] = [y_name, x_name]
+    if ds.sizes[x_name] > 1 and ds.sizes[y_name] > 1:
+        ds.attrs["spatial:transform"] = spatial_transform(ds)
 
     # --- Per-variable attrs for spatial data vars ---
     for var in ds.data_vars:
         if {x_name, y_name} <= set(ds[var].dims):
             ds[var].attrs["grid_mapping"] = gm_coord
-            ds[var].attrs["proj:wkt2"] = wkt_string
+            ds[var].attrs.update(proj)
             ds[var].attrs["spatial:dimensions"] = [y_name, x_name]
 
     return ds

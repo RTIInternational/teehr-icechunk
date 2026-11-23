@@ -186,7 +186,8 @@ def _write_overview_batch(
     _, origin, time_step = tg.read_grid(rw_session.store)
     axis_end = xr.open_zarr(rw_session.store, group=spec.data_group, consolidated=False)[dim].to_index()[-1]
 
-    # The tile server reads the data group as the full-resolution level, so it needs the transform too
+    # The tile server reads the data group as the full-resolution level, so it needs the transform too; repos
+    # created before ingest wrote it get it here
     group_attrs = zarr.open_group(rw_session.store, path=spec.data_group.strip("/"), mode="a", zarr_format=3).attrs
     if "spatial:transform" not in group_attrs:
         group_attrs["spatial:transform"] = gu.spatial_transform(blocks[0][0])

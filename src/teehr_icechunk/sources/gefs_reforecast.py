@@ -3,7 +3,7 @@
 Cycles are daily at 00Z with members c00 and p01-p04; once a week (Wednesdays) p05-p10 too, and the run
 extends to 35 days. Each GRIB2 file holds one variable at every lead, with a ``.idx`` beside it. Days 1-10
 are 3-hourly on a 0.25 degree grid; beyond day 10, 6-hourly on 0.5 degrees. So there are two repos, one per
-grid: ``0p25`` (leads 3-240 h) and ``0p5`` (leads 3-840 h, of which 3-240 h hold only the pressure levels
+grid: ``0p25`` (leads 3-240 h) and ``0p50`` (leads 3-840 h, of which 3-240 h hold only the pressure levels
 above 700 hPa).
 
 Each message is one chunk, decoded by the gribberish codec (the ``[grib]`` extra) at read time.
@@ -26,7 +26,9 @@ from obstore.store import S3Store
 from pydantic import Field, field_validator
 
 from teehr_icechunk.grib_index import StaleIndexError, check_last_message, message_ranges, parse_index, window
-from teehr_icechunk.repo_const import LEAD_TIME, MEMBER, REFERENCE_TIME, STATUS_COORD
+from teehr_icechunk.repo_const import (
+    CELL_METHODS_ATTR, LEAD_TIME, MEMBER, REFERENCE_TIME, STATUS_COORD, WINDOW_RESET_HOURS_ATTR,
+)
 from teehr_icechunk.sources import IndexSource, listing_frame
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,8 @@ PREFIX = "GEFSv12/reforecast"
 IO_THREADS = 64
 # Messages reset their windows at multiples of this many hours
 WINDOW_RESET_HOURS = 6
+# The CF cell_methods (along time) of each GRIB step type; arrays carry these, the index labels the step type
+CF_TIME_METHODS = {"instant": "point", "acc": "sum", "ave": "mean", "max": "maximum", "min": "minimum"}
 WEDNESDAY = 2
 
 
@@ -50,18 +54,22 @@ class GefsVariable:
     step_type: Literal["instant", "acc", "ave", "max", "min"]
     units: str
     long_name: str
+    standard_name: str  # CF
 
 
 # Single-level variables, named <ELEMENT>_<level>; more come with add-variables runs
 CATALOG: dict[str, GefsVariable] = {
-    "APCP_surface": GefsVariable("apcp_sfc", "APCP", "surface", "acc", "kg m-2", "Total precipitation"),
-    "TMP_2m": GefsVariable("tmp_2m", "TMP", "2 m above ground", "instant", "K", "Temperature at 2 m"),
-    "TMAX_2m": GefsVariable("tmax_2m", "TMAX", "2 m above ground", "max", "K", "Maximum temperature at 2 m"),
-    "TMIN_2m": GefsVariable("tmin_2m", "TMIN", "2 m above ground", "min", "K", "Minimum temperature at 2 m"),
+    "APCP_surface": GefsVariable("apcp_sfc", "APCP", "surface", "acc", "kg m-2", "Total precipitation",
+                                 "precipitation_amount"),
+    "TMP_2m": GefsVariable("tmp_2m", "TMP", "2 m above ground", "instant", "K", "Temperature at 2 m", "air_temperature"),
+    "TMAX_2m": GefsVariable("tmax_2m", "TMAX", "2 m above ground", "max", "K", "Maximum temperature at 2 m",
+                            "air_temperature"),
+    "TMIN_2m": GefsVariable("tmin_2m", "TMIN", "2 m above ground", "min", "K", "Minimum temperature at 2 m",
+                            "air_temperature"),
 }
 
 # grid -> (degrees, (n_lat, n_lon))
-GRIDS = {"0p25": (0.25, (721, 1440)), "0p5": (0.5, (361, 720))}
+GRIDS = {"0p25": (0.25, (721, 1440)), "0p50": (0.5, (361, 720))}
 _FILE_PATTERN = re.compile(
     rf"^{PREFIX}/(\d{{4}})/(\d{{10}})/(c00|p\d\d)/(Days:1-10|Days:10-16|Days:10-35)/([a-z0-9_]+)_\2_\3\.grib2$"
 )
@@ -82,7 +90,7 @@ class GEFSv12Reforecast(IndexSource):
     """GEFS v12 reforecast cycles, members 0-10, one repo per grid."""
 
     type: Literal["gefs-v12-reforecast"] = "gefs-v12-reforecast"
-    grid: Literal["0p25", "0p5"] = Field(..., description="0p25: days 1-10 at 0.25 degrees; 0p5: up to 35 days at 0.5")
+    grid: Literal["0p25", "0p50"] = Field(..., description="0p25: days 1-10 at 0.25 degrees; 0p50: up to 35 days at 0.5")
     variables: list[str] = Field(
         default=["APCP_surface", "TMAX_2m", "TMIN_2m"],
         description="Variables to reference, from CATALOG (more can be added later, e.g. TMP_2m)",
@@ -236,10 +244,11 @@ class GEFSv12Reforecast(IndexSource):
                 dimension_names=dims,
             )
             empty = ManifestArray(metadata=metadata, chunkmanifest=ChunkManifest(entries={}, shape=(1, len(members), len(leads), 1, 1)))
-            attrs = {"units": var.units, "long_name": var.long_name, "grib_element": var.element, "grib_level": var.level,
-                     "step_type": var.step_type}
+            attrs = {"units": var.units, "long_name": var.long_name, "standard_name": var.standard_name,
+                     "grib_element": var.element, "grib_level": var.level,
+                     CELL_METHODS_ATTR: f"time: {CF_TIME_METHODS[var.step_type]}"}
             if var.step_type != "instant":
-                attrs["window_reset_hours"] = WINDOW_RESET_HOURS
+                attrs[WINDOW_RESET_HOURS_ATTR] = WINDOW_RESET_HOURS
             data_vars[name] = (dims, empty, attrs)
         coords = {
             REFERENCE_TIME: [self.time_origin()], MEMBER: np.array(members, "int32"), LEAD_TIME: np.array(leads, "int32"),

@@ -58,6 +58,29 @@ Readers refuse a `layout_version` other than 1 or 2 rather than guess at the lay
 `time` and `value_time` label the **end** of an averaging or accumulation interval, so an analysis and a
 forecast on the same grid line up with `analysis.sel(time=forecast.value_time)`.
 
+## Variable attributes
+
+Besides `units` and `long_name`, each variable says how its values relate to time, following CF. Windows that restart during a forecast (GEFS: every 6 h, so 3 h and 6 h windows alternate) have no CF form, so a windowed variable also gives `window_reset_hours`:
+
+| Attribute | Values | Meaning |
+|---|---|---|
+| `cell_methods` | CF, e.g. `time: point`, `time: sum`, `time: mean`, `time: maximum`, `time: minimum` | How each value relates to time: an instant, or the sum, mean, maximum or minimum over a window ending at the lead |
+| `window_reset_hours` | integer hours, e.g. 6, or 0 | Windowed variables only: windows restart at multiples of this many hours after the cycle, so each covers the hours since the last multiple before its lead; 0 means they never restart, so each covers the hours since the cycle (e.g. an accumulation from the cycle) |
+
+For example, GEFS APCP at 0.25 degrees (`time: sum`, reset 6) covers 3 h at leads 3, 9, ... and 6 h at leads 6, 12, .... Readers that name or combine values by the hours they cover (`grid_spec.window_hours`) use these; a variable without them covers the hours since the lead before it.
+
+## Spatial metadata
+
+Each group and its gridded variables carry CF and GeoZarr metadata, written when the repo is created:
+
+| Where | Attributes |
+|---|---|
+| Grid mapping coordinate (`spatial_ref` or the source's, e.g. `crs`) | CF grid mapping parameters, `crs_wkt` |
+| Each gridded variable | `grid_mapping`, `proj:wkt2`, `proj:code` (EPSG CRSs only), `spatial:dimensions` (`[y, x]`), `standard_name` where known |
+| Each group | `proj:wkt2`, `proj:code`, `spatial:dimensions`, `spatial:transform` (regular grids: pixel size and the outer corner of the first pixel), `Conventions` |
+
+Overview levels carry their own `spatial:transform`.
+
 ## Time grid and per-step status
 
 The append axis has a slot for every step from `time_origin`, whether written or not. Slots not yet

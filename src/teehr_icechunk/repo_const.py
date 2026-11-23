@@ -59,6 +59,16 @@ FORECAST_STATUS_ATTRS = {
 AUDIT_COORDS = ("created_at", "updated_at", "source_last_modified")
 STEP_COORDS = (STATUS_COORD, *AUDIT_COORDS)
 
+# --- Variable attributes ---
+# CF cell_methods: how a variable's values relate to time, e.g. "time: point" (an instant) or "time: sum" over a
+# window ending at the lead
+CELL_METHODS_ATTR = "cell_methods"
+# CF time methods whose values cover a window
+WINDOWED_CELL_METHODS = ("sum", "mean", "maximum", "minimum")
+# A windowed variable's windows restart at multiples of this many hours after the cycle (GEFS: 6); 0 means
+# they never restart, so each value covers the hours since the cycle
+WINDOW_RESET_HOURS_ATTR = "window_reset_hours"
+
 # --- Forecast coordinates ---
 # Forecast repos append along reference_time; member (ensembles only) and lead_time are fixed axes
 REFERENCE_TIME = "reference_time"
