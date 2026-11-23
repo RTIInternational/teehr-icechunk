@@ -84,7 +84,8 @@ class GEFSv12Reforecast(IndexSource):
     type: Literal["gefs-v12-reforecast"] = "gefs-v12-reforecast"
     grid: Literal["0p25", "0p5"] = Field(..., description="0p25: days 1-10 at 0.25 degrees; 0p5: up to 35 days at 0.5")
     variables: list[str] = Field(
-        default=["APCP_surface", "TMP_2m", "TMAX_2m", "TMIN_2m"], description="Variables to reference, from CATALOG"
+        default=["APCP_surface", "TMAX_2m", "TMIN_2m"],
+        description="Variables to reference, from CATALOG (more can be added later, e.g. TMP_2m)",
     )
 
     source_bucket: ClassVar[str] = f"s3://{BUCKET}"
