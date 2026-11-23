@@ -125,6 +125,7 @@ def configure_icechunk_s3_repo(
     prefix: str,
     vc_credentials_kwargs: dict | None = None,
     vc_store_kwargs: dict | None = None,
+    manifest_split: tuple[str, int] | None = None,
     **kwargs
 ) -> ic.repository.Repository:
     """Configure an IceChunk S3 repository with a virtual chunk container.
@@ -144,6 +145,9 @@ def configure_icechunk_s3_repo(
         Given only when opening the repository; never saved in its config.
     vc_store_kwargs : dict, optional
         Options for the source's object store config (e.g., region).
+    manifest_split : tuple[str, int], optional
+        (dimension, steps): split every array's manifests every ``steps`` along ``dimension``, so a commit
+        rewrites only the manifests it touches. Applies only when the repository is created.
     **kwargs : dict
         Additional keyword arguments to pass to the s3_storage function.
     """
@@ -180,6 +184,11 @@ def configure_icechunk_s3_repo(
         )
     else:
         logger.info(f"No existing IceChunk repository found at bucket: {dest_bucket}, prefix: {prefix}. Creating new repository.")
+        if manifest_split is not None:
+            dim, steps = manifest_split
+            config.manifest = ic.ManifestConfig(splitting=ic.ManifestSplittingConfig.from_dict(
+                {ic.ManifestSplitCondition.AnyArray(): {ic.ManifestSplitDimCondition.DimensionName(dim): steps}}
+            ))
         repo = ic.Repository.create(
             storage,
             config=config,

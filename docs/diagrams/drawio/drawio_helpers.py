@@ -35,7 +35,7 @@ LEGEND_ITEMS = [
     (ICECHUNK, "teehr-icechunk"),
     (CLIENT, "Client deployment (teehr-hub, teehr-fved)"),
     (CORE, "Shared core (teehr-cloud-core)"),
-    (FETCH, "Fetch package (planned)"),
+    (FETCH, "Fetch package (ADR-0015)"),
     (STORE, "Storage"),
     (EXT, "External"),
 ]

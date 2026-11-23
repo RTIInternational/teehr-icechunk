@@ -373,3 +373,32 @@ def test_forecast_repo_matches_golden(forecast):
     if os.environ.get("RECORD_GOLDEN"):  # only for a deliberate layout change; bump layout_version if readers break
         FORECAST_GOLDEN.write_text(json.dumps(snap, indent=1, sort_keys=True))
     assert snap == json.loads(FORECAST_GOLDEN.read_text())
+
+
+def test_write_step_metadata_for_forecast_steps(forecast):
+    """Forecast steps (cycle, member, lead) are recorded in their slots, leaving the rest of their cycles alone."""
+    repo, block = forecast
+    _write(repo, block([0]), ENSEMBLE)
+    session = repo.writable_session("main")
+    tg.ensure_axis(session, "references", REFS[3], FC_STEP, DIM)
+    steps = pd.MultiIndex.from_tuples([(REFS[2], 1, 3), (REFS[3], 0, 1), (REFS[3], 0, 2)], names=[DIM, "member", "lead_time"])
+    tg.write_step_metadata(session, "references", DIM, steps, [2, 1, 2], np.full(3, MODIFIED), tg.utc_now())
+    stored = tg.read_step_metadata(session.store, "references", DIM)
+    assert stored.status.loc[steps].tolist() == [2, 1, 2]
+    assert (stored.status.drop(steps).loc[REFS[1]:] == rc.UNWRITTEN).all()
+    assert (stored.status.loc[REFS[0]] == 2).all()  # the cycle written before is untouched
+
+
+def test_slots_the_source_never_publishes_are_marked_once(forecast):
+    """Unwritten slots outside the source's pattern become NOT_EXPECTED; written ones and reruns are left alone."""
+    repo, block = forecast
+    _write(repo, block([0]), ENSEMBLE)
+    session = repo.writable_session("main")
+    tg.ensure_axis(session, "references", REFS[3], FC_STEP, DIM)
+    expected = np.ones((4, len(MEMBERS), len(LEADS)), bool)
+    expected[:, 1, -1] = False  # member 1 never publishes the last lead
+    assert tg.mark_not_expected(session, "references", DIM, expected) == 3  # cycle 0 is written already
+    stored = tg.read_step_metadata(session.store, "references", DIM)
+    assert (stored.status.xs((1, 6), level=("member", "lead_time")).tolist() == [2, rc.NOT_EXPECTED, rc.NOT_EXPECTED,
+                                                                                    rc.NOT_EXPECTED])
+    assert tg.mark_not_expected(session, "references", DIM, expected) == 0

@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import ClassVar
 
+import numpy as np
 import pandas as pd
 import xarray as xr
 from pydantic import BaseModel
@@ -67,6 +68,13 @@ class GriddedSource(BaseModel, ABC):
         """Ensemble members, fixed when the repo is created; None for sources without members."""
         return None
 
+    def expected_steps(self, reference_times: pd.DatetimeIndex) -> np.ndarray | None:
+        """Which (cycle, *fixed axes) steps the source publishes, shaped like them; None when it publishes every one.
+
+        Slots it never publishes are marked ``NOT_EXPECTED``, so readers and completeness checks skip them.
+        """
+        return None
+
     def fixed_axes(self) -> dict[str, list[int]]:
         """The repo's axes after its append axis, in order; empty for analysis sources."""
         axes = {MEMBER: self.members(), LEAD_TIME: self.lead_times()}
@@ -93,6 +101,33 @@ class GriddedSource(BaseModel, ABC):
         """Adjust one file's virtual dataset before concatenation."""
         return ds
 
+
+class IndexSource(GriddedSource):
+    """A source whose references come from its files' indexes (e.g. GRIB2 ``.idx``), not from parsing the files.
+
+    One file may hold many steps and a step many files, so the source lists its files, turns them into steps
+    and builds a reference table (``refs.REF_COLUMNS`` indexed by step) itself; ``template`` gives one step of
+    empty virtual arrays to create the repo from.
+    """
+
+    @abstractmethod
+    def list_source_files(self, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+        """The source's files for steps in the range, one row each, with whatever ``reference_table`` needs."""
+
+    @abstractmethod
+    def steps_from_files(self, files: pd.DataFrame) -> pd.DataFrame:
+        """The step listing (``LISTING_COLUMNS``, indexed like ``list_files``) of ``list_source_files`` rows."""
+
+    @abstractmethod
+    def reference_table(self, files: pd.DataFrame) -> pd.DataFrame:
+        """References to the messages in ``files``: ``refs.REF_COLUMNS`` indexed by step."""
+
+    @abstractmethod
+    def template(self) -> xr.Dataset:
+        """One step of empty virtual arrays, with coordinates, attrs and CRS, for creating the repo."""
+
+    def list_files(self, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+        return self.steps_from_files(self.list_source_files(start_dt, end_dt))
 
 def listing_frame(rows: list[dict], index: tuple[str, ...] = ("time",)) -> pd.DataFrame:
     """A source listing (``LISTING_COLUMNS``) from row dicts, indexed by ``index`` and sorted."""
