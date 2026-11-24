@@ -1,6 +1,8 @@
-"""Map overviews: block means of the data group on its own grid, in ``/overviews/<factor>``."""
+"""Map overviews: block means of the data group on its own grid, in ``/overviews/<factor>``, on the run model."""
 import logging
 import time
+from dataclasses import dataclass
+
 import icechunk as ic
 import numpy as np
 import pandas as pd
@@ -13,11 +15,27 @@ from teehr_icechunk.grid_spec import GridSpec, read_grid_spec
 from teehr_icechunk.models import BuildOverviewsDataInput, OVERVIEW_CHUNK_SIZE
 from teehr_icechunk.packed_encoding import PackedEncoding
 from teehr_icechunk.repo_const import OVERVIEW_GROUP_PATH, STATUS_COORD, VALUE_TIME
+from teehr_icechunk.units import (
+    InProcessRunner, Runner, Unit, UnitResult, commit_rebasing, commit_unit, plan_units, raise_failed, unit_slots,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def build_overviews(args: BuildOverviewsDataInput) -> None:
+def open_repo(args: BuildOverviewsDataInput) -> ic.Repository:
+    """The run's repository, able to read its data group (``/references`` reads the source with the run's credentials)."""
+    storage = gu.build_icechunk_s3_storage(
+        bucket=args.dest_bucket,
+        prefix=f"{args.base_prefix}/{args.configuration_name}",
+        **args.s3_storage_kwargs
+    )
+    source = getattr(args, "source", None)
+    return gu.open_repo_for_reading(storage, source.credentials() if source else None)
+
+
+def build_overviews(
+    args: BuildOverviewsDataInput, runner: Runner | None = None, repo: ic.Repository | None = None
+) -> list[UnitResult]:
     """Build map overviews for the steps the data group changed, and write them into their slots.
 
     Reads the repo's data group (``/data``, or ``/references`` when not materialized), only the
@@ -26,38 +44,128 @@ def build_overviews(args: BuildOverviewsDataInput) -> None:
     server uses the data group as full resolution and the overviews as coarser levels, and
     reprojects each tile on request.
 
+    Runs on the run model: the levels are prepared here, units of whole shards build them (in this process, or
+    as child runs through ``runner``), and each unit's steps are recorded here as it succeeds. Returns each
+    unit's outcome; a failed unit is retried by the next run.
+
     Parameters
     ----------
     args : BuildOverviewsDataInput
         Run parameters; see BuildOverviewsDataInput for field descriptions.
     """
-    storage = gu.build_icechunk_s3_storage(
-        bucket=args.dest_bucket,
-        prefix=f"{args.base_prefix}/{args.configuration_name}",
-        **args.s3_storage_kwargs
-    )
-    # The data group may be /references, whose chunks live in the source; the ingest run's args carry its credentials
-    source = getattr(args, "source", None)
-    repo = gu.open_repo_for_reading(storage, source.credentials() if source else None)
-    logger.info(
-        f"Icechunk repo opened at: {args.dest_bucket}/{args.base_prefix}/{args.configuration_name}."
-    )
-
+    repo = repo or open_repo(args)
+    logger.info(f"Icechunk repo opened at: {args.dest_bucket}/{args.base_prefix}/{args.configuration_name}.")
     store = repo.readonly_session("main").store
     # The repo's own shape, so a standalone run needs no forecast settings
     spec = read_grid_spec(store)
-    dim, data_group = spec.append_dim, spec.data_group
-    data_meta = tg.read_step_metadata(store, data_group, dim)
+    dim = spec.append_dim
+    data_meta = tg.read_step_metadata(store, spec.data_group, dim)
     if data_meta is None:
-        logger.info(f"No data found in {data_group}.")
-        return
-
-    first_level = f"{OVERVIEW_GROUP_PATH}/{args.overview_factors[0]}"
-    stale = tg.stale_steps(data_meta, tg.read_step_metadata(store, first_level, dim))
+        logger.info(f"No data found in {spec.data_group}.")
+        return []
+    stale = _stale_steps(store, spec, data_meta, args)
     if len(stale) == 0:
         logger.info(f"{OVERVIEW_GROUP_PATH} is up to date.")
-        return
-    data_ds = gu.open_zarr_group(store=store, group_path=data_group)
+        return []
+    data_ds = _data_dataset(store, spec, args)
+    _prepare(repo, spec, data_ds, data_meta, args)
+
+    store = repo.readonly_session("main").store
+    _, origin, time_step = tg.read_grid(store)
+    # Analysis shards span steps along the append axis; a forecast shard holds one cycle, so any cycle bounds one
+    blocks = [] if spec.fixed_dims else [_stored_shard_steps(store, spec, args)]
+    split = getattr(getattr(args, "source", None), "manifest_split_steps", None)
+    times = stale.get_level_values(dim) if isinstance(stale, pd.MultiIndex) else stale
+    units = plan_units(times, origin, time_step, unit_slots(args.unit_steps, *blocks, *([split] if split else [])))
+    logger.info(f"Building overviews for {len(stale)} step(s) in {len(units)} unit(s).")
+
+    def record(result: UnitResult) -> None:
+        if result.error is not None:
+            return
+        done = result.unit.select(stale, dim)
+        if len(done) == 0:
+            return
+        meta = data_meta.loc[done]
+        session = repo.writable_session("main")
+        for factor in args.overview_factors:
+            # The data group's status and write time, so a step is current until that group changes again
+            tg.write_step_metadata(
+                session, f"{OVERVIEW_GROUP_PATH}/{factor}", dim, done,
+                status=meta[STATUS_COORD].to_numpy(),
+                source_last_modified=meta["source_last_modified"].to_numpy(),
+                updated_at=meta["updated_at"].to_numpy(),
+            )
+        commit_rebasing(session, f"Recorded {len(done)} overview step(s), {result.unit.start} to {result.unit.end}")
+
+    results = (runner or InProcessRunner()).run(OverviewWork(repo, args), units, on_done=record)
+    raise_failed(results)
+    return results
+
+
+@dataclass
+class OverviewWork:
+    """One unit's overviews: its stale steps, read and averaged in batches of whole shards, written and committed.
+
+    Runs in the parent (``InProcessRunner``) or in a child run rebuilt from ``parameters``.
+    """
+
+    repo: ic.Repository
+    args: BuildOverviewsDataInput
+
+    def __call__(self, unit: Unit) -> None:
+        args = self.args
+        store = self.repo.readonly_session("main").store
+        spec = read_grid_spec(store)
+        dim = spec.append_dim
+        data_meta = tg.read_step_metadata(store, spec.data_group, dim)
+        stale = unit.select(_stale_steps(store, spec, data_meta, args), dim)
+        if len(stale) == 0:
+            return
+        data_ds = _data_dataset(store, spec, args)
+        # Batches of whole shards bound memory by the batch
+        fixed = {d: data_ds[d].values for d in spec.fixed_dims}
+        if fixed:
+            batches = tg.step_batches(stale, fixed, args.num_shard_chunks * args.time_chunk_size, args.time_batch_size)
+        else:
+            batches = tg.shard_batches(stale, data_meta.index, args.time_batch_size)
+        session = self.repo.writable_session("main")
+        started = time.perf_counter()
+        for i, batch in enumerate(batches, start=1):
+            batch_started = time.perf_counter()
+            # A forecast batch's stale leads need not be contiguous; each rectangle is written on its own
+            for block in tg.step_blocks(batch, fixed) if fixed else [batch]:
+                ds_block = data_ds.sel(tg.block_selection(block, dim)).load()
+                for factor, level_ds in _overview_levels(ds_block, args.overview_factors).items():
+                    level_ds = _clip_to_packed_range(level_ds, args.overview_encoding)
+                    tg.write_chunks(session, f"{OVERVIEW_GROUP_PATH}/{factor}", level_ds, dim, fixed_dims=spec.fixed_dims)
+            logger.info(
+                f"Processed overview batch {i} of {len(batches)} ({len(batch)} step(s)) "
+                f"in {time.perf_counter() - batch_started:.1f}s."
+            )
+        commit_unit(session, f"Overviews for {len(stale)} step(s), {unit.start} to {unit.end}")
+        logger.info(f"Built overviews for {len(stale)} step(s) in {time.perf_counter() - started:.1f}s.")
+
+    def parameters(self, unit: Unit) -> dict:
+        return {"stage": "overviews", "args": self.args.model_dump(mode="json"), "unit": unit.to_dict()}
+
+
+def _stale_steps(store: ic.IcechunkStore, spec: GridSpec, data_meta: pd.DataFrame, args: BuildOverviewsDataInput) -> pd.Index:
+    """Steps the overviews lack, or hold from an older write of the data group."""
+    first_level = f"{OVERVIEW_GROUP_PATH}/{args.overview_factors[0]}"
+    return tg.stale_steps(data_meta, tg.read_step_metadata(store, first_level, spec.append_dim))
+
+
+def _stored_shard_steps(store: ic.IcechunkStore, spec: GridSpec, args: BuildOverviewsDataInput) -> int:
+    """Steps per shard along the append axis of the first level, as created; a run's own settings may differ."""
+    level = zarr.open_group(store, path=f"{OVERVIEW_GROUP_PATH}/{args.overview_factors[0]}".strip("/"), mode="r",
+                            zarr_format=3)
+    arr = next(a for _, a in level.arrays() if spec.append_dim in (a.metadata.dimension_names or ()) and a.ndim > 2)
+    return (arr.shards or arr.chunks)[list(arr.metadata.dimension_names).index(spec.append_dim)]
+
+
+def _data_dataset(store: ic.IcechunkStore, spec: GridSpec, args: BuildOverviewsDataInput) -> xr.Dataset:
+    """The data group's gridded variables, lazily, decoded with NaN for missing values."""
+    data_ds = gu.open_zarr_group(store=store, group_path=spec.data_group)
     data_ds = data_ds.drop_vars([n for n in (*tg.STEP_COORDS, VALUE_TIME) if n in data_ds.variables])
     # Scalars such as the grid mapping ride along as coords; only gridded variables get overviews
     data_ds = data_ds.set_coords([v for v in data_ds.data_vars if data_ds[v].ndim == 0])
@@ -70,28 +178,41 @@ def build_overviews(args: BuildOverviewsDataInput) -> None:
             data_ds[var].encoding.pop("missing_value", None)
             data_ds[var].encoding["_FillValue"] = np.nan
     _check_packing_units(data_ds, args.overview_encoding)
+    return data_ds
 
-    # Batches of whole shards bound memory by the batch; each is committed, so a failed run resumes
+
+def _prepare(
+    repo: ic.Repository, spec: GridSpec, data_ds: xr.Dataset, data_meta: pd.DataFrame, args: BuildOverviewsDataInput
+) -> None:
+    """Create each overview level (or extend its axis to the data group's), in one commit, so units only write chunks."""
+    dim = spec.append_dim
+    session = repo.writable_session("main")
+    _, origin, time_step = tg.read_grid(session.store)
+    axis_end = data_meta.index.get_level_values(dim)[-1]
     fixed = {d: data_ds[d].values for d in spec.fixed_dims}
-    if fixed:
-        batches = tg.step_batches(stale, fixed, args.num_shard_chunks * args.time_chunk_size, args.time_batch_size)
-    else:
-        batches = tg.shard_batches(stale, data_meta.index, args.time_batch_size)
-    logger.info(f"Building overviews for {len(stale)} step(s) in {len(batches)} batch(es).")
-    started = time.perf_counter()
-    for i, batch in enumerate(batches, start=1):
-        batch_started = time.perf_counter()
-        # A forecast batch's stale leads need not be contiguous; each rectangle is written on its own
-        blocks = [
-            (data_ds.sel(tg.block_selection(block, dim)), data_meta.loc[block])
-            for block in (tg.step_blocks(batch, fixed) if fixed else [batch])
-        ]
-        _write_overview_batch(repo, spec, fixed, blocks, args)
-        logger.info(
-            f"Processed overview batch {i} of {len(batches)} ({len(batch)} step(s)) "
-            f"in {time.perf_counter() - batch_started:.1f}s."
-        )
-    logger.info(f"Built overviews for {len(stale)} step(s) in {time.perf_counter() - started:.1f}s.")
+    # The tile server reads the data group as the full-resolution level, so it needs the transform too; repos
+    # created before ingest wrote it get it here
+    group_attrs = zarr.open_group(session.store, path=spec.data_group.strip("/"), mode="a", zarr_format=3).attrs
+    if "spatial:transform" not in group_attrs:
+        group_attrs["spatial:transform"] = gu.spatial_transform(data_ds)
+        logger.info(f"Recorded spatial:transform on {spec.data_group}.")
+    levels = None
+    for factor in args.overview_factors:
+        group = f"{OVERVIEW_GROUP_PATH}/{factor}"
+        if tg.read_step_metadata(session.store, group, dim) is None:
+            # One step's levels give a new level its variables, attrs and encoding; read only when one is created
+            levels = levels or _overview_levels(data_ds.isel({dim: [0], **{d: [0] for d in fixed}}).load(),
+                                                args.overview_factors)
+            level_ds = _clip_to_packed_range(levels[factor], args.overview_encoding)
+            tg.create_group(session, group, level_ds, origin, time_step, dim, axis_end,
+                            encoding=_overview_encoding(level_ds, spec, args), fixed=fixed)
+            logger.info(f"Created {group} on a {time_step} grid from {origin} to {axis_end}.")
+        else:
+            added = tg.ensure_axis(session, group, axis_end, time_step, dim)
+            if added:
+                logger.info(f"Extended {group} by {added} slot(s) to {axis_end}.")
+    if session.has_uncommitted_changes:
+        session.commit(f"Prepared {OVERVIEW_GROUP_PATH} through {axis_end}")
 
 
 def _check_packing_units(ds: xr.Dataset, overview_encoding: dict[str, PackedEncoding]) -> None:
@@ -168,65 +289,3 @@ def _overview_levels(ds: xr.Dataset, factors: list[int]) -> dict[int, xr.Dataset
         level.attrs["spatial:transform"] = gu.spatial_transform(level)
         levels[factor], previous = level, factor
     return levels
-
-
-def _write_overview_batch(
-    repo: ic.Repository,
-    spec: GridSpec,
-    fixed: dict,
-    blocks: list[tuple[xr.Dataset, pd.DataFrame]],
-    args: BuildOverviewsDataInput,
-) -> None:
-    """Average one batch into each overview level and write it into its slots, in one commit.
-
-    A batch is one or more blocks: a run of time steps, or a rectangle of forecast steps.
-    """
-    dim = spec.append_dim
-    rw_session = repo.writable_session("main")
-    _, origin, time_step = tg.read_grid(rw_session.store)
-    axis_end = xr.open_zarr(rw_session.store, group=spec.data_group, consolidated=False)[dim].to_index()[-1]
-
-    # The tile server reads the data group as the full-resolution level, so it needs the transform too; repos
-    # created before ingest wrote it get it here
-    group_attrs = zarr.open_group(rw_session.store, path=spec.data_group.strip("/"), mode="a", zarr_format=3).attrs
-    if "spatial:transform" not in group_attrs:
-        group_attrs["spatial:transform"] = gu.spatial_transform(blocks[0][0])
-        logger.info(f"Recorded spatial:transform on {spec.data_group}.")
-
-    # Each level's group is set up and its step metadata read once per batch; blocks never share steps
-    existing_by_group: dict[str, pd.DataFrame] = {}
-    for ds_block, block_meta in blocks:
-        ds_block = ds_block.load()
-        for factor, level_ds in _overview_levels(ds_block, args.overview_factors).items():
-            level_ds = _clip_to_packed_range(level_ds, args.overview_encoding)
-            group = f"{OVERVIEW_GROUP_PATH}/{factor}"
-            if group not in existing_by_group:
-                existing = tg.read_step_metadata(rw_session.store, group, dim)
-                if existing is None:
-                    tg.create_group(rw_session, group, level_ds, origin, time_step, dim, axis_end,
-                                    encoding=_overview_encoding(level_ds, spec, args), fixed=fixed)
-                    logger.info(f"Created {group} on a {time_step} grid from {origin} to {axis_end}.")
-                    existing = tg.read_step_metadata(rw_session.store, group, dim)
-                else:
-                    added = tg.ensure_axis(rw_session, group, axis_end, time_step, dim)
-                    if added:
-                        logger.info(f"Extended {group} by {added} slot(s) to {axis_end}.")
-                existing_by_group[group] = existing
-            level_ds = tg.with_step_metadata(
-                level_ds,
-                dim,
-                status=block_meta[STATUS_COORD].to_numpy(),
-                source_last_modified=block_meta["source_last_modified"].to_numpy(),
-                # The data group's write time, so the step is current until that group changes again
-                updated_at=block_meta["updated_at"].to_numpy(),
-                existing=existing_by_group[group],
-                fixed_dims=spec.fixed_dims,
-            )
-            tg.region_write(rw_session, group, level_ds, dim, fixed_dims=spec.fixed_dims)
-
-    n_steps = sum(len(meta) for _, meta in blocks)
-    snapshot_id = rw_session.commit(
-        f"Committed {len(args.overview_factors)} overview levels ({n_steps} time step(s)) "
-        f"to {args.dest_bucket}/{args.base_prefix}/{args.configuration_name}"
-    )
-    logger.info(f"Overviews committed with snapshot ID: {snapshot_id}.")

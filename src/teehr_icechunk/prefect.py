@@ -2,20 +2,20 @@
 
 The parent flow plans the units and calls ``PrefectRunner.run``, which starts one run of the child-unit
 deployment per unit (at most ``max_parallel`` at a time) and waits for them. The child flow, defined in each
-client so its parameters validate against the client's sources, calls ``run_unit``.
+client so its parameters validate against the client's sources, calls ``run_unit`` with the unit's stage.
 """
 import contextvars
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Sequence
 
 import pandas as pd
 from prefect.deployments import run_deployment
 
-from teehr_icechunk import index_ingest
-from teehr_icechunk.models import IngestGriddedDataInput
-from teehr_icechunk.units import Unit, UnitResult, UnitWork
+from teehr_icechunk import overviews, ref_ingest
+from teehr_icechunk.models import BuildOverviewsDataInput
+from teehr_icechunk.units import InProcessRunner, OnDone, Runner, Unit, UnitResult, UnitWork
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,8 @@ class PrefectRunner:
     """Runs each unit as a run of ``deployment`` ("<flow name>/<deployment name>"), as subflows of the caller.
 
     ``job_variables`` override the child's pod (e.g. its resources); ``timeout_seconds`` bounds the wait for
-    one child (None waits until it finishes; the child's own flow timeout still applies).
+    one child (None waits until it finishes; the child's own flow timeout still applies). A run of one unit
+    (e.g. a scheduled update) runs it in this process: a child pod would only add its start-up.
     """
 
     deployment: str
@@ -38,7 +39,10 @@ class PrefectRunner:
     job_variables: dict = field(default_factory=dict)
     timeout_seconds: float | None = None
 
-    def run(self, work: UnitWork, units: Sequence[Unit]) -> list[UnitResult]:
+    def run(self, work: UnitWork, units: Sequence[Unit], on_done: OnDone = None) -> list[UnitResult]:
+        if len(units) == 1:
+            return InProcessRunner().run(work, units, on_done)
+
         def run_one(unit: Unit) -> UnitResult:
             try:
                 flow_run = run_deployment(
@@ -56,14 +60,30 @@ class PrefectRunner:
         with ThreadPoolExecutor(min(self.max_parallel, max(1, len(units)))) as pool:
             # Each thread runs in a copy of this context, so the children are subflows of the calling flow run
             futures = [pool.submit(contextvars.copy_context().run, run_one, unit) for unit in units]
+            for future in as_completed(futures):
+                if on_done:
+                    on_done(future.result())
             results = [f.result() for f in futures]
         failed = sum(r.error is not None for r in results)
         logger.info(f"{len(results) - failed} of {len(results)} unit(s) succeeded.")
         return results
 
 
-def run_unit(args: IngestGriddedDataInput, unit: dict, window: dict) -> None:
-    """A child run's work: one unit of an index source's references (``index_ingest.IndexRefsWork``)."""
-    repo = index_ingest.open_repo(args)
-    work = index_ingest.IndexRefsWork(repo, args, pd.Timestamp(window["start"]), pd.Timestamp(window["end"]))
+def runner(args: BuildOverviewsDataInput, deployment: str) -> Runner:
+    """Units as runs of ``deployment``, ``args.max_child_runs`` at a time, or in this process when that is 0."""
+    if args.max_child_runs:
+        return PrefectRunner(deployment, args.max_child_runs, args.child_job_variables)
+    return InProcessRunner()
+
+
+def run_unit(args: BuildOverviewsDataInput, unit: dict, window: dict | None = None, stage: str = "references") -> None:
+    """A child run's work: one unit of a stage, its references (``args`` an ``IngestGriddedDataInput``, within
+    the run's ``window``) or its overviews."""
+    if stage == "overviews":
+        work = overviews.OverviewWork(overviews.open_repo(args), args)
+    elif stage == "references":
+        repo = ref_ingest.open_repo(args)
+        work = ref_ingest.RefsWork(repo, args, pd.Timestamp(window["start"]), pd.Timestamp(window["end"]))
+    else:
+        raise ValueError(f"Unknown stage {stage!r}; 'references' or 'overviews'.")
     work(Unit.from_dict(unit))

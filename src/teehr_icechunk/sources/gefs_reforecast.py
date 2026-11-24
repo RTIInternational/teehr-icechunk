@@ -193,7 +193,7 @@ class GEFSv12Reforecast(IndexSource):
                              STATUS_COORD: "stable", "last_modified": group["last_modified"].max()})
         return listing_frame(rows, (REFERENCE_TIME, MEMBER, LEAD_TIME))
 
-    def reference_table(self, files: pd.DataFrame) -> pd.DataFrame:
+    def reference_table(self, files: pd.DataFrame, args=None, stored=None) -> pd.DataFrame:
         """References to every message of ``files`` (rows of ``list_source_files``), indexed by step.
 
         A file whose index is stale (its ranges or last message don't fit the file) is skipped with an error.
@@ -227,7 +227,7 @@ class GEFSv12Reforecast(IndexSource):
                                            "last_modified"])
         return refs.set_index([REFERENCE_TIME, MEMBER, LEAD_TIME])
 
-    def template(self) -> xr.Dataset:
+    def template(self, files=None, args=None) -> xr.Dataset:
         """One cycle of empty virtual arrays, for creating the repo: one chunk per message, decoded by gribberish."""
         from virtualizarr.manifests import ChunkManifest, ManifestArray
         from virtualizarr.manifests.utils import create_v3_array_metadata

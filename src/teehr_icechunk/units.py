@@ -3,12 +3,13 @@
 A unit is a contiguous run of append-axis slots, aligned from the origin to whole storage blocks (shards,
 manifest splits), so two units never write the same chunk or manifest. Before any unit runs, the caller
 prepares every group and axis; a unit then only writes chunks and commits them, rebasing over other units'
-commits. The caller records per-step metadata for the units that succeeded, so that one writer owns it.
+commits. The caller records per-step metadata for each unit that succeeds, as it finishes, so that one writer
+owns it and a run that stops part-way keeps what its finished units wrote.
 """
 import logging
 import math
 from dataclasses import dataclass
-from typing import Protocol, Sequence
+from typing import Callable, Optional, Protocol, Sequence
 
 import icechunk as ic
 import pandas as pd
@@ -66,27 +67,53 @@ class UnitWork(Protocol):
     def parameters(self, unit: Unit) -> dict: ...
 
 
+# Called in the caller's thread with each unit's result as it finishes, e.g. to record the unit's steps
+OnDone = Optional[Callable[[UnitResult], None]]
+
+
 class Runner(Protocol):
-    def run(self, work: UnitWork, units: Sequence[Unit]) -> list[UnitResult]: ...
+    def run(self, work: UnitWork, units: Sequence[Unit], on_done: OnDone = None) -> list[UnitResult]: ...
 
 
 class InProcessRunner:
     """Runs units one after another in this process; a failed unit doesn't stop the others."""
 
-    def run(self, work: UnitWork, units: Sequence[Unit]) -> list[UnitResult]:
+    def run(self, work: UnitWork, units: Sequence[Unit], on_done: OnDone = None) -> list[UnitResult]:
         results = []
         for i, unit in enumerate(units, start=1):
             try:
                 work(unit)
-                results.append(UnitResult(unit))
+                result = UnitResult(unit)
             except Exception as e:  # recorded; the caller decides whether the run failed
                 logger.exception(f"Unit {i} of {len(units)} ({unit.start} to {unit.end}) failed.")
-                results.append(UnitResult(unit, f"{type(e).__name__}: {e}"))
+                result = UnitResult(unit, f"{type(e).__name__}: {e}")
+            if on_done:
+                on_done(result)
+            results.append(result)
         return results
+
+
+def assert_chunks_only(session: ic.Session) -> None:
+    """Raise if the session changed anything but chunks: only the parent creates groups and arrays and changes
+    their metadata, as concurrent units would otherwise overwrite each other's (Icechunk's rebase doesn't catch it)."""
+    diff = session.status()
+    changed = {
+        name: nodes for name in ("new_groups", "new_arrays", "deleted_groups", "deleted_arrays", "updated_groups",
+                                 "updated_arrays", "moved_nodes")
+        if (nodes := getattr(diff, name))
+    }
+    if changed:
+        raise RuntimeError(f"A unit may only write chunks, but it changed {changed}.")
 
 
 def commit_unit(session: ic.Session, message: str) -> str:
     """Commit a unit's chunks, rebasing over units committed since its session started."""
+    assert_chunks_only(session)
+    return commit_rebasing(session, message)
+
+
+def commit_rebasing(session: ic.Session, message: str) -> str:
+    """Commit, rebasing over commits made since the session started (units' chunks, or the parent's step metadata)."""
     return session.commit(message, rebase_with=ic.ConflictDetector(), rebase_tries=10)
 
 

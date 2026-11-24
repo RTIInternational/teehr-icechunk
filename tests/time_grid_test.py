@@ -216,3 +216,36 @@ def test_write_step_metadata_records_only_the_given_steps(repo, source):
     assert second.created_at.loc[DAYS[4]] == first.created_at.loc[DAYS[4]]
     with pytest.raises(ValueError, match="not slots"):
         tg.write_step_metadata(session, "references", DIM, pd.DatetimeIndex([DAYS[29] + STEP]), [2], [MODIFIED], later)
+
+
+def test_write_chunks_writes_values_only(repo, source):
+    """A unit's write: values land in their slots, encoded as stored, and no metadata or coordinate changes."""
+    session = repo.writable_session("main")
+
+    def days_ds(days):
+        values = np.broadcast_to(np.asarray(days.dayofyear, "float32")[:, None, None], (len(days), 6, 8))
+        return xr.Dataset({"SWE": ((DIM, "lat", "lon"), values)}, coords={DIM: days, "lat": np.arange(6.0), "lon": np.arange(8.0)})
+
+    template = days_ds(DAYS[:1])
+    encoding = {"SWE": {"dtype": "uint16", "scale_factor": 0.5, "_FillValue": 65535, "fill_value": 65535, "chunks": (1, 6, 8)}}
+    tg.create_group(session, "data", template, ORIGIN, STEP, DIM, DAYS[9], encoding=encoding)
+    session.commit("prepare")
+
+    session = repo.writable_session("main")
+    days = DAYS[[7, 2, 3]]  # out of order, two runs of slots
+    ds = days_ds(days).assign_attrs(other="x")
+    tg.write_chunks(session, "data", ds, DIM)
+    changed = session.status()
+    assert not (changed.updated_arrays or changed.updated_groups) and set(changed.updated_chunks) == {"/data/SWE"}
+    session.commit("unit")
+    data = xr.open_zarr(repo.readonly_session("main").store, group="data", consolidated=False)
+    assert [data.SWE.sel(time=d).values[0, 0] for d in days] == [d.dayofyear for d in days]
+    assert data.SWE.isel(time=[0, 1, 4]).isnull().all() and (data.status == tg.UNWRITTEN).all()
+    assert data.SWE.encoding["dtype"] == np.uint16 and "other" not in data.attrs
+
+
+def test_present_steps_finds_the_steps_with_chunks(repo, source):
+    _, _, open_days = source
+    _write_refs(repo, open_days(DAYS[[1, 4]]), 2, end=DAYS[9])
+    session = repo.readonly_session("main")
+    assert tg.present_steps(session, "references", "SWE", DAYS[:6]).tolist() == [False, True, False, False, True, False]
