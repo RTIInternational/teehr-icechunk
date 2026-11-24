@@ -1,6 +1,7 @@
 """Overviews built end to end match what they stored when the goldens were recorded (values, encoding, step metadata)."""
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import ClassVar, Literal
 
@@ -9,12 +10,15 @@ import pandas as pd
 import pytest
 import xarray as xr
 import zarr
+from pydantic import create_model
 
 pytest.importorskip("h5netcdf")
+pytest.importorskip("prefect")
 ic = pytest.importorskip("icechunk")
 
 from teehr_icechunk import grid_utils as gu  # noqa: E402
 from teehr_icechunk import ingest, overviews  # noqa: E402
+from teehr_icechunk import prefect as ic_prefect  # noqa: E402
 from teehr_icechunk import time_grid as tg  # noqa: E402
 from teehr_icechunk.data_status import with_status  # noqa: E402
 from teehr_icechunk.models import BuildOverviewsDataInput, IngestGriddedDataInput  # noqa: E402
@@ -23,6 +27,7 @@ from teehr_icechunk.repo_const import (  # noqa: E402
     APPEND_DIM_ATTR, FIXED_DIMS_ATTR, FORECAST_LAYOUT_VERSION, LAYOUT_VERSION_ATTR, TIME_ORIGIN_ATTR, TIME_STEP_ATTR,
 )
 from teehr_icechunk.sources import GriddedSource  # noqa: E402
+from teehr_icechunk.units import Unit, UnitResult  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ORIGIN, DAY = pd.Timestamp("2000-01-01"), pd.Timedelta("1D")
@@ -33,20 +38,40 @@ MODIFIED = pd.Timestamp("2026-01-01")
 
 
 def _local_repo(tmp_path):
+    """A repo whose virtual chunk container serves tmp_path/src; in memory, which is safe for concurrent commits."""
     src = tmp_path / "src"
     src.mkdir()
     prefix = f"file://{src}/"
     config = ic.RepositoryConfig.default()
     config.set_virtual_chunk_container(ic.VirtualChunkContainer(prefix, ic.local_filesystem_store(str(src))))
-    repo = ic.Repository.create(ic.local_filesystem_storage(str(tmp_path / "repo")), config=config,
+    repo = ic.Repository.create(ic.in_memory_storage(), config=config,
                                 authorize_virtual_chunk_access={prefix: ic.credentials.LocalFileSystemAccess})
     return repo, src, prefix
 
 
-def _build_overviews(repo, args, monkeypatch):
-    monkeypatch.setattr(overviews.gu, "build_icechunk_s3_storage", lambda **kwargs: None)
-    monkeypatch.setattr(overviews.gu, "open_repo_for_reading", lambda storage, credentials=None: repo)
-    overviews.build_overviews(args)
+class ChildRunner:
+    """What ``PrefectRunner`` does, in threads: each unit runs from its JSON parameters through ``run_unit``, two at
+    once, committing side by side. ``kill`` units fail before writing anything."""
+
+    def __init__(self, model, kill=()):
+        self.model, self.kill = model, kill
+
+    def run(self, work, units):
+        def one(unit):
+            if unit in self.kill:
+                return UnitResult(unit, "killed")
+            params = json.loads(json.dumps(work.parameters(unit)))
+            ic_prefect.run_unit(self.model.model_validate(params["args"]), params["unit"], params.get("window"), params["stage"])
+            return UnitResult(unit)
+
+        with ThreadPoolExecutor(2) as pool:
+            return list(pool.map(one, units))
+
+
+def _build_overviews(repo, args, runner=None, monkeypatch=None):
+    if monkeypatch is not None:  # child runs open the repo themselves
+        monkeypatch.setattr(overviews, "open_repo", lambda args: repo)
+    overviews.build_overviews(args, runner=runner, repo=repo)
 
 
 def _snapshot(repo) -> dict:
@@ -133,17 +158,39 @@ def _write_days(repo, src, prefix, args, days, modified):
     ingest.record_data_group(repo, "/references")
 
 
-def test_analysis_overviews_match_golden(tmp_path, monkeypatch):
+def _analysis_args(prefix, **kwargs):
+    source = _analysis_source(prefix)
+    model = create_model("LocalInput", __base__=IngestGriddedDataInput, source=(type(source), ...))
+    return model(source=source, dest_bucket="b", base_prefix="p", fallback_source_crs="EPSG:5070",
+                 num_shard_chunks=4, time_batch_size=8, overview_factors=[2, 4], **kwargs)
+
+
+def test_analysis_overviews_match_golden(tmp_path):
     """Two runs: out-of-order days with one missing, then later days and an upserted one (only stale steps rebuilt)."""
     repo, src, prefix = _local_repo(tmp_path)
-    args = IngestGriddedDataInput(
-        source=_analysis_source(prefix), dest_bucket="b", base_prefix="p", fallback_source_crs="EPSG:5070",
-        num_shard_chunks=4, time_batch_size=8, overview_factors=[2, 4],
-    )
+    args = _analysis_args(prefix)
     _write_days(repo, src, prefix, args, DAYS[[9, 0, 1, 2, 3, 4, 6, 7, 8, 10, 11]], MODIFIED)
-    _build_overviews(repo, args, monkeypatch)
+    _build_overviews(repo, args)
     _write_days(repo, src, prefix, args, DAYS[[3, *range(12, 20)]], MODIFIED + DAY)
-    _build_overviews(repo, args, monkeypatch)
+    _build_overviews(repo, args)
+    _check_golden(_snapshot(repo), "overviews_analysis_golden.json")
+
+
+def test_fanned_out_overviews_match_golden_and_a_killed_unit_is_redone(tmp_path, monkeypatch):
+    """Units of one shard as concurrent child runs store the same overviews; a killed unit's steps stay unwritten
+    (the run fails) until the next run builds them."""
+    repo, src, prefix = _local_repo(tmp_path)
+    args = _analysis_args(prefix, unit_steps=4)
+    runner = ChildRunner(type(args))
+    _write_days(repo, src, prefix, args, DAYS[[9, 0, 1, 2, 3, 4, 6, 7, 8, 10, 11]], MODIFIED)
+    killed = Unit(DAYS[4], DAYS[7])
+    with pytest.raises(RuntimeError, match="1 of 3 unit"):
+        _build_overviews(repo, args, ChildRunner(type(args), kill=[killed]), monkeypatch)
+    status = tg.read_step_metadata(repo.readonly_session("main").store, "overviews/2", "time")["status"]
+    assert (status.loc[killed.start:killed.end] == tg.UNWRITTEN).all() and (status.loc[DAYS[[0, 8, 11]]] == 2).all()
+    _build_overviews(repo, args, runner, monkeypatch)
+    _write_days(repo, src, prefix, args, DAYS[[3, *range(12, 20)]], MODIFIED + DAY)
+    _build_overviews(repo, args, runner, monkeypatch)
     _check_golden(_snapshot(repo), "overviews_analysis_golden.json")
 
 
@@ -188,17 +235,21 @@ def _write_forecast(repo, ds):
     session.commit("write")
 
 
-def test_forecast_overviews_match_golden(tmp_path, monkeypatch):
-    """Two runs: a partial cycle and a whole one, then the rest of the partial cycle and a new one."""
+@pytest.mark.parametrize("fan_out", [False, True])
+def test_forecast_overviews_match_golden(tmp_path, monkeypatch, fan_out):
+    """Two runs: a partial cycle and a whole one, then the rest of the partial cycle and a new one; one cycle per
+    unit when fanned out."""
     repo, _, _ = _local_repo(tmp_path)
     args = BuildOverviewsDataInput(
         configuration_name="golden", dest_bucket="b", base_prefix="p", num_shard_chunks=2, time_batch_size=4,
         overview_factors=[2], overview_encoding={"RAINRATE": PackedEncoding(dtype="uint16", max_value=0.8, units="mm s^-1")},
+        unit_steps=1,
     )
+    runner = ChildRunner(BuildOverviewsDataInput) if fan_out else None
     _write_forecast(repo, _forecast_block(CYCLES[[1]], [0], [2, 3]))
     _write_forecast(repo, _forecast_block(CYCLES[[0]], [0, 1], FIXED["lead_time"]))
-    _build_overviews(repo, args, monkeypatch)
+    _build_overviews(repo, args, runner, monkeypatch)
     _write_forecast(repo, _forecast_block(CYCLES[[1]], [1], [1, 2, 3]))
     _write_forecast(repo, _forecast_block(CYCLES[[2]], [0, 1], FIXED["lead_time"]))
-    _build_overviews(repo, args, monkeypatch)
+    _build_overviews(repo, args, runner, monkeypatch)
     _check_golden(_snapshot(repo), "overviews_forecast_golden.json")

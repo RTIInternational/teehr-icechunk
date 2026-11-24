@@ -9,7 +9,6 @@ import logging
 from dataclasses import dataclass
 
 import icechunk as ic
-import numpy as np
 import pandas as pd
 
 from teehr_icechunk import grid_utils as gu
@@ -29,7 +28,9 @@ from teehr_icechunk.repo_const import (
     TIME_STEP_ATTR,
     TIMESERIES_TYPE_ATTR,
 )
-from teehr_icechunk.units import InProcessRunner, Runner, Unit, UnitResult, commit_unit, plan_units, raise_failed, unit_slots
+from teehr_icechunk.units import (
+    InProcessRunner, Runner, Unit, UnitResult, commit_unit, plan_units, raise_failed, steps_in, unit_slots,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ class IndexRefsWork:
 
     def parameters(self, unit: Unit) -> dict:
         window = {"start": self.start.isoformat(), "end": self.end.isoformat()}
-        return {"args": self.args.model_dump(mode="json"), "unit": unit.to_dict(), "window": window}
+        return {"stage": "references", "args": self.args.model_dump(mode="json"), "unit": unit.to_dict(), "window": window}
 
 
 def ingest_references(
@@ -152,10 +153,7 @@ def ingest_references(
 
     done = [r.unit for r in results if r.error is None]
     if done:
-        in_done = np.zeros(len(todo), bool)
-        for unit in done:
-            in_done |= np.asarray((times >= unit.start) & (times <= unit.end))
-        steps = todo[in_done]
+        steps = todo.loc[steps_in(todo.index, dim, done)]
         session = repo.writable_session("main")
         tg.write_step_metadata(
             session, REFERENCES_GROUP_PATH, dim, steps.index,

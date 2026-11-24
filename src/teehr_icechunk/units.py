@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Protocol, Sequence
 
 import icechunk as ic
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,15 @@ def commit_unit(session: ic.Session, message: str) -> str:
     """Commit a unit's chunks, rebasing over units committed since its session started."""
     assert_chunks_only(session)
     return session.commit(message, rebase_with=ic.ConflictDetector(), rebase_tries=10)
+
+
+def steps_in(steps: pd.Index, dim: str, units: Sequence[Unit]) -> pd.Index:
+    """The ``steps`` (times, or forecast steps with ``dim`` as a level) inside any of ``units``."""
+    times = steps if not isinstance(steps, pd.MultiIndex) else steps.get_level_values(dim)
+    inside = np.zeros(len(steps), bool)
+    for unit in units:
+        inside |= np.asarray((times >= unit.start) & (times <= unit.end))
+    return steps[inside]
 
 
 def raise_failed(results: Sequence[UnitResult]) -> None:

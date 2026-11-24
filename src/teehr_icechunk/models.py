@@ -126,6 +126,24 @@ class BuildOverviewsDataInput(BaseGriddedDataInput):
         )
     )
 
+    max_child_runs: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Units run at once as child flow runs (fan-out across pods); 0 runs every unit in this run. Applies "
+            "to overviews, and to references from sources on the run model"
+        )
+    )
+    unit_steps: int = Field(
+        default=365,
+        gt=0,
+        description="Append-axis slots per unit of work, rounded up to whole shards and manifest splits"
+    )
+    child_job_variables: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Job variables for child runs (e.g. their resources), overriding the child deployment's"
+    )
+
     @field_validator("overview_factors")
     @classmethod
     def _nested_factors(cls, v: list[int]) -> list[int]:
@@ -231,23 +249,6 @@ class IngestGriddedDataInput(BuildOverviewsDataInput):
     build_overviews_on_ingest: bool = Field(
         default=True,
         description="If True, build the map overviews of the data group after materializing data"
-    )
-    max_child_runs: int = Field(
-        default=0,
-        ge=0,
-        description=(
-            "Units run at once as child flow runs (fan-out across pods); 0 runs every unit in this run. Used by "
-            "index sources (e.g. GRIB2 references) for now"
-        )
-    )
-    unit_steps: int = Field(
-        default=365,
-        gt=0,
-        description="Append-axis slots per unit of work, rounded up to whole manifest splits"
-    )
-    child_job_variables: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Job variables for child runs (e.g. their resources), overriding the child deployment's"
     )
 
     # --- Per-component extra kwargs ---

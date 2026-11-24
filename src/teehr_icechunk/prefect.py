@@ -2,7 +2,7 @@
 
 The parent flow plans the units and calls ``PrefectRunner.run``, which starts one run of the child-unit
 deployment per unit (at most ``max_parallel`` at a time) and waits for them. The child flow, defined in each
-client so its parameters validate against the client's sources, calls ``run_unit``.
+client so its parameters validate against the client's sources, calls ``run_unit`` with the unit's stage.
 """
 import contextvars
 import logging
@@ -13,9 +13,9 @@ from typing import Sequence
 import pandas as pd
 from prefect.deployments import run_deployment
 
-from teehr_icechunk import index_ingest
-from teehr_icechunk.models import IngestGriddedDataInput
-from teehr_icechunk.units import Unit, UnitResult, UnitWork
+from teehr_icechunk import index_ingest, overviews
+from teehr_icechunk.models import BuildOverviewsDataInput
+from teehr_icechunk.units import InProcessRunner, Runner, Unit, UnitResult, UnitWork
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +62,21 @@ class PrefectRunner:
         return results
 
 
-def run_unit(args: IngestGriddedDataInput, unit: dict, window: dict) -> None:
-    """A child run's work: one unit of an index source's references (``index_ingest.IndexRefsWork``)."""
-    repo = index_ingest.open_repo(args)
-    work = index_ingest.IndexRefsWork(repo, args, pd.Timestamp(window["start"]), pd.Timestamp(window["end"]))
+def runner(args: BuildOverviewsDataInput, deployment: str) -> Runner:
+    """Units as runs of ``deployment``, ``args.max_child_runs`` at a time, or in this process when that is 0."""
+    if args.max_child_runs:
+        return PrefectRunner(deployment, args.max_child_runs, args.child_job_variables)
+    return InProcessRunner()
+
+
+def run_unit(args: BuildOverviewsDataInput, unit: dict, window: dict | None = None, stage: str = "references") -> None:
+    """A child run's work: one unit of a stage, its references (``args`` an ``IngestGriddedDataInput``, within
+    the run's ``window``) or its overviews."""
+    if stage == "overviews":
+        work = overviews.OverviewWork(overviews.open_repo(args), args)
+    elif stage == "references":
+        repo = index_ingest.open_repo(args)
+        work = index_ingest.IndexRefsWork(repo, args, pd.Timestamp(window["start"]), pd.Timestamp(window["end"]))
+    else:
+        raise ValueError(f"Unknown stage {stage!r}; 'references' or 'overviews'.")
     work(Unit.from_dict(unit))
