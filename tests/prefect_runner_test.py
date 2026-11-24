@@ -52,3 +52,10 @@ def test_children_get_their_unit_and_failures_are_recorded(monkeypatch):
     assert peak[0] <= 2
     assert sorted(c[1] for c in calls) == sorted(u.start.isoformat() for u in UNITS)
     assert all(c[0] == "process-gridded-unit/hub" and c[2] == {"cpu": 4} for c in calls)
+
+
+def test_run_names_fit_kubernetes_job_names():
+    """The Kubernetes worker cuts job names to 45 characters; the unit's dates must survive."""
+    name = ic_prefect.run_name(UNITS[0])
+    assert name == f"process-gridded-unit-{UNITS[0].start:%Y%m%d%H}-{UNITS[0].end:%Y%m%d%H}"
+    assert len(name) <= 45
