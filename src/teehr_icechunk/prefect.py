@@ -20,6 +20,11 @@ from teehr_icechunk.units import Unit, UnitResult, UnitWork
 logger = logging.getLogger(__name__)
 
 
+def run_name(unit: Unit) -> str:
+    """The child run's name, also its pod's: within the Kubernetes worker's 45 characters, so the dates stay whole."""
+    return f"process-gridded-unit-{unit.start:%Y%m%d%H}-{unit.end:%Y%m%d%H}"
+
+
 @dataclass
 class PrefectRunner:
     """Runs each unit as a run of ``deployment`` ("<flow name>/<deployment name>"), as subflows of the caller.
@@ -38,7 +43,7 @@ class PrefectRunner:
             try:
                 flow_run = run_deployment(
                     self.deployment, parameters=work.parameters(unit), job_variables=self.job_variables or None,
-                    timeout=self.timeout_seconds, flow_run_name=f"unit-{unit.start:%Y%m%d%H}-{unit.end:%Y%m%d%H}",
+                    timeout=self.timeout_seconds, flow_run_name=run_name(unit),
                 )
             except Exception as e:  # e.g. the API was unreachable; recorded like a failed run
                 return UnitResult(unit, f"{type(e).__name__}: {e}")

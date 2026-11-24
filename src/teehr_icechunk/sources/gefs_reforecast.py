@@ -14,7 +14,7 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import ClassVar, Literal
 
 import numpy as np
@@ -37,6 +37,9 @@ BUCKET = "noaa-gefs-retrospective"
 PREFIX = "GEFSv12/reforecast"
 # Requests in flight while listing and reading indexes; they are small and latency-bound
 IO_THREADS = 64
+# Back off from 1 s, not obstore's 100 ms: many units reading at once get throttled (503 SlowDown), and
+# the retries then spread over tens of seconds within the 3 minute retry timeout
+RETRY_CONFIG = {"backoff": {"init_backoff": timedelta(seconds=1)}}
 # Messages reset their windows at multiples of this many hours
 WINDOW_RESET_HOURS = 6
 # The CF cell_methods (along time) of each GRIB step type; arrays carry these, the index labels the step type
@@ -97,7 +100,7 @@ class GEFSv12Reforecast(IndexSource):
     )
 
     source_bucket: ClassVar[str] = f"s3://{BUCKET}"
-    store_kwargs: ClassVar[dict] = {"region": "us-east-1", "skip_signature": True}
+    store_kwargs: ClassVar[dict] = {"region": "us-east-1", "skip_signature": True, "retry_config": RETRY_CONFIG}
     virtual_store_kwargs: ClassVar[dict] = {"region": "us-east-1"}
     materialize_by_default: ClassVar[bool] = False
     time_step: ClassVar[pd.Timedelta] = pd.Timedelta("1D")
