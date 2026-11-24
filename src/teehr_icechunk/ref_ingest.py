@@ -33,7 +33,7 @@ from teehr_icechunk.repo_const import (
 )
 from teehr_icechunk.sources import ParsedSource
 from teehr_icechunk.units import (
-    InProcessRunner, Runner, Unit, UnitResult, commit_unit, plan_units, raise_failed, steps_in, unit_slots,
+    InProcessRunner, Runner, Unit, UnitResult, commit_rebasing, commit_unit, plan_units, raise_failed, unit_slots,
 )
 
 logger = logging.getLogger(__name__)
@@ -115,12 +115,15 @@ class RefsWork:
         files = source.list_source_files(max(unit.start, self.start), min(unit.end, self.end))
         stored = tg.read_step_metadata(self.repo.readonly_session("main").store, REFERENCES_GROUP_PATH, dim)
         todo = tg.select_source_steps(source.steps_from_files(files), stored, self.args.write_mode)
+        # Files published since the parent's listing can be past the prepared axis; the next run takes them
+        todo = todo[todo.index.get_level_values(dim) <= stored.index.get_level_values(dim).max()]
         if todo.empty:
             return
         session = self.repo.writable_session("main")
         group = zarr.open_group(session.store, path=REFERENCES_GROUP_PATH.strip("/"), mode="r", zarr_format=3)
         refs = source.reference_table(source.files_for_steps(files, todo.index), self.args, group)
         refs = refs[refs.index.isin(todo.index)]
+        _check_rewrites_read(todo.index.difference(refs.index.unique()), stored)
         n = write_virtual_refs(session, REFERENCES_GROUP_PATH, refs)
         commit_unit(session, f"References for {len(todo)} step(s), {unit.start} to {unit.end}")
         logger.info(f"Wrote {n} reference(s) for {len(todo)} step(s) from {unit.start} to {unit.end}.")
@@ -128,6 +131,17 @@ class RefsWork:
     def parameters(self, unit: Unit) -> dict:
         window = {"start": self.start.isoformat(), "end": self.end.isoformat()}
         return {"stage": "references", "args": self.args.model_dump(mode="json"), "unit": unit.to_dict(), "window": window}
+
+
+def _check_rewrites_read(skipped: pd.Index, stored: pd.DataFrame) -> None:
+    """Fail the unit if a step already written was to be rewritten but its file couldn't be read: recording the newer
+    file would leave the older references in place, checked against the older file, and never retried."""
+    written = skipped[(stored[STATUS_COORD].reindex(skipped) >= 0).to_numpy()]
+    if len(written):
+        raise RuntimeError(
+            f"{len(written)} written step(s) have newer files that couldn't be read, e.g. {written[0]}; the next run "
+            "retries them."
+        )
 
 
 def ingest_references(
@@ -141,7 +155,7 @@ def ingest_references(
     """Write ``/references`` for the source's steps from ``start`` to ``end``; returns each unit's outcome.
 
     Units hold about ``unit_steps`` append-axis slots, aligned to the source's manifest splits. Step metadata
-    is recorded for the units that succeeded; a failed unit is retried by the next run.
+    is recorded for each unit that succeeds, as it finishes; a failed unit is retried by the next run.
     """
     source, dim = args.source, args.append_dim
     repo = repo or open_repo(args)
@@ -157,25 +171,30 @@ def ingest_references(
     split = getattr(source, "manifest_split_steps", None)
     units = plan_units(times, source.time_origin(), source.time_step, unit_slots(unit_steps, *([split] if split else [])))
     logger.info(f"Running {len(units)} unit(s).")
-    results = (runner or InProcessRunner()).run(RefsWork(repo, args, pd.Timestamp(start), pd.Timestamp(end)), units)
 
-    done = [r.unit for r in results if r.error is None]
-    if done:
-        steps = todo.loc[steps_in(todo.index, dim, done)]
+    def record(result: UnitResult) -> None:
+        if result.error is not None:
+            return
+        steps = todo.loc[result.unit.select(todo.index, dim)]
         session = repo.writable_session("main")
         if isinstance(source, ParsedSource):
-            # Files a unit skipped as missing or unreadable left their steps without chunks
+            # Files the unit skipped as missing or unreadable left their (new) steps without chunks
             present = tg.present_steps(session, REFERENCES_GROUP_PATH, args.variable_names[0], steps.index)
             if not present.all():
                 logger.warning(f"{(~present).sum()} step(s) were skipped (missing or unreadable files).")
             steps = steps[present]
+        if steps.empty:
+            return
         tg.write_step_metadata(
             session, REFERENCES_GROUP_PATH, dim, steps.index,
             status=steps[STATUS_COORD].map(STATUS_MEANINGS.index).to_numpy(),
             source_last_modified=steps["last_modified"].to_numpy("datetime64[ms]"),
             updated_at=tg.utc_now(),
         )
-        session.commit(f"Recorded {len(steps)} step(s) of {len(done)} unit(s)")
-        logger.info(f"Recorded {len(steps)} step(s) written by {len(done)} unit(s).")
+        commit_rebasing(session, f"Recorded {len(steps)} step(s), {result.unit.start} to {result.unit.end}")
+        logger.info(f"Recorded {len(steps)} step(s) from {result.unit.start} to {result.unit.end}.")
+
+    work = RefsWork(repo, args, pd.Timestamp(start), pd.Timestamp(end))
+    results = (runner or InProcessRunner()).run(work, units, on_done=record)
     raise_failed(results)
     return results

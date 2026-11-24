@@ -280,3 +280,41 @@ def test_a_file_laid_out_unlike_the_repo_fails_its_unit(parsed):
     _day_file(src, pd.Timestamp("2000-01-13"), chunks=(1, *GRID))  # one tile, where the repo has four
     with pytest.raises(RuntimeError, match="unlike the repo"):
         ref_ingest.ingest_references(args, pd.Timestamp("2000-01-13"), pd.Timestamp("2000-01-13"), repo=repo)
+
+
+def test_a_file_published_after_the_listing_waits_for_the_next_run(parsed, monkeypatch):
+    """A unit lists its files again; one past the axis the parent prepared is left for the next run."""
+    src, args, new_repo = parsed
+    repo = new_repo("repo")
+    real = FakeParsedSource.list_files
+    calls = []
+
+    def late(self, start_dt, end_dt):
+        calls.append(1)
+        listing = real(self, start_dt, end_dt)
+        return listing.iloc[:-1] if len(calls) == 1 else listing  # the parent's listing misses the 4th
+
+    monkeypatch.setattr(FakeParsedSource, "list_files", late)
+    ref_ingest.ingest_references(args, pd.Timestamp("2000-01-02"), pd.Timestamp("2000-01-04"), repo=repo)
+    meta = tg.read_step_metadata(repo.readonly_session("main").store, "/references", "time")
+    assert meta.index[-1] == pd.Timestamp("2000-01-03") and (meta[STATUS_COORD] >= 0).sum() == 2
+    ref_ingest.ingest_references(args, pd.Timestamp("2000-01-02"), pd.Timestamp("2000-01-04"), repo=repo)
+    meta = tg.read_step_metadata(repo.readonly_session("main").store, "/references", "time")
+    assert meta.loc["2000-01-04", STATUS_COORD] >= 0
+
+
+def test_a_written_step_whose_newer_file_cant_be_read_fails_its_unit(parsed):
+    """Upsert would otherwise record the newer file while the older references stay, never to be retried."""
+    src, args, new_repo = parsed
+    repo = new_repo("repo")
+    args = args.model_copy(update={"write_mode": "upsert"})
+    ref_ingest.ingest_references(args, pd.Timestamp("2000-01-02"), pd.Timestamp("2000-01-04"), repo=repo)
+    before = tg.read_step_metadata(repo.readonly_session("main").store, "/references", "time")
+    path = src / "20000103.nc"
+    path.write_bytes(b"re-uploading")
+    later = before.loc["2000-01-03", "source_last_modified"].timestamp() + 60
+    os.utime(path, (later, later))
+    with pytest.raises(RuntimeError, match="couldn't be read"):
+        ref_ingest.ingest_references(args, pd.Timestamp("2000-01-02"), pd.Timestamp("2000-01-04"), repo=repo)
+    after = tg.read_step_metadata(repo.readonly_session("main").store, "/references", "time")
+    assert after.loc["2000-01-03", "source_last_modified"] == before.loc["2000-01-03", "source_last_modified"]

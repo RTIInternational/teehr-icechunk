@@ -264,6 +264,10 @@ def _open_virtual_safe(
         return None, f"Corrupt or unreadable file skipped: {url} ({e})"
 
 
+# open_virtual_datasets' error when every file was skipped
+NO_VIRTUAL_DATASETS = "No virtual datasets were created"
+
+
 def open_virtual_datasets(
     file_list: list,
     registry: ObjectStoreRegistry,
@@ -319,7 +323,7 @@ def open_virtual_datasets(
         url: preprocess(ds, url) if preprocess else ds for (ds, _), url in zip(opened, file_list) if ds is not None
     }
     if len(virtual_datasets) == 0:
-        raise ValueError("No virtual datasets were created. Check the file list and registry of the source data.")
+        raise ValueError(f"{NO_VIRTUAL_DATASETS}. Check the file list and registry of the source data.")
     logger.info(f"Found {len(virtual_datasets)} virtual datasets from {len(file_list)} files.")
     return virtual_datasets
 

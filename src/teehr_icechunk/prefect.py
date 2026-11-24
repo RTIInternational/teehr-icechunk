@@ -6,7 +6,7 @@ client so its parameters validate against the client's sources, calls ``run_unit
 """
 import contextvars
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -15,7 +15,7 @@ from prefect.deployments import run_deployment
 
 from teehr_icechunk import overviews, ref_ingest
 from teehr_icechunk.models import BuildOverviewsDataInput
-from teehr_icechunk.units import InProcessRunner, Runner, Unit, UnitResult, UnitWork
+from teehr_icechunk.units import InProcessRunner, OnDone, Runner, Unit, UnitResult, UnitWork
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +39,9 @@ class PrefectRunner:
     job_variables: dict = field(default_factory=dict)
     timeout_seconds: float | None = None
 
-    def run(self, work: UnitWork, units: Sequence[Unit]) -> list[UnitResult]:
+    def run(self, work: UnitWork, units: Sequence[Unit], on_done: OnDone = None) -> list[UnitResult]:
         if len(units) == 1:
-            return InProcessRunner().run(work, units)
+            return InProcessRunner().run(work, units, on_done)
 
         def run_one(unit: Unit) -> UnitResult:
             try:
@@ -60,6 +60,9 @@ class PrefectRunner:
         with ThreadPoolExecutor(min(self.max_parallel, max(1, len(units)))) as pool:
             # Each thread runs in a copy of this context, so the children are subflows of the calling flow run
             futures = [pool.submit(contextvars.copy_context().run, run_one, unit) for unit in units]
+            for future in as_completed(futures):
+                if on_done:
+                    on_done(future.result())
             results = [f.result() for f in futures]
         failed = sum(r.error is not None for r in results)
         logger.info(f"{len(results) - failed} of {len(results)} unit(s) succeeded.")

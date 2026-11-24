@@ -56,7 +56,7 @@ class ChildRunner:
     def __init__(self, model, kill=()):
         self.model, self.kill = model, kill
 
-    def run(self, work, units):
+    def run(self, work, units, on_done=None):
         def one(unit):
             if unit in self.kill:
                 return UnitResult(unit, "killed")
@@ -65,7 +65,19 @@ class ChildRunner:
             return UnitResult(unit)
 
         with ThreadPoolExecutor(2) as pool:
-            return list(pool.map(one, units))
+            results = list(pool.map(one, units))
+        for result in results:
+            on_done(result)
+        return results
+
+
+class KilledParent:
+    """Runs the first unit, records it, then dies, as a parent hitting its timeout would."""
+
+    def run(self, work, units, on_done=None):
+        work(units[0])
+        on_done(UnitResult(units[0]))
+        raise TimeoutError("parent killed")
 
 
 def _build_overviews(repo, args, runner=None, monkeypatch=None):
@@ -161,8 +173,8 @@ def _write_days(repo, src, prefix, args, days, modified):
 def _analysis_args(prefix, **kwargs):
     source = _analysis_source(prefix)
     model = create_model("LocalInput", __base__=IngestGriddedDataInput, source=(type(source), ...))
-    return model(source=source, dest_bucket="b", base_prefix="p", fallback_source_crs="EPSG:5070",
-                 num_shard_chunks=4, time_batch_size=8, overview_factors=[2, 4], **kwargs)
+    settings = {"num_shard_chunks": 4, "time_batch_size": 8, "overview_factors": [2, 4], **kwargs}
+    return model(source=source, dest_bucket="b", base_prefix="p", fallback_source_crs="EPSG:5070", **settings)
 
 
 def test_analysis_overviews_match_golden(tmp_path):
@@ -191,6 +203,25 @@ def test_fanned_out_overviews_match_golden_and_a_killed_unit_is_redone(tmp_path,
     _build_overviews(repo, args, runner, monkeypatch)
     _write_days(repo, src, prefix, args, DAYS[[3, *range(12, 20)]], MODIFIED + DAY)
     _build_overviews(repo, args, runner, monkeypatch)
+    _check_golden(_snapshot(repo), "overviews_analysis_golden.json")
+    # Units keep to the shards the levels were created with, whatever a later run's settings
+    store = repo.readonly_session("main").store
+    other = _analysis_args(prefix, num_shard_chunks=6, time_batch_size=6)
+    assert overviews._stored_shard_steps(store, overviews.read_grid_spec(store), other) == 4
+
+
+def test_a_killed_parent_keeps_its_finished_units(tmp_path):
+    """Each unit's steps are recorded as it finishes, so a parent that dies part-way doesn't redo them."""
+    repo, src, prefix = _local_repo(tmp_path)
+    args = _analysis_args(prefix, unit_steps=4)
+    _write_days(repo, src, prefix, args, DAYS[[9, 0, 1, 2, 3, 4, 6, 7, 8, 10, 11]], MODIFIED)
+    with pytest.raises(TimeoutError):
+        _build_overviews(repo, args, KilledParent())
+    status = tg.read_step_metadata(repo.readonly_session("main").store, "overviews/2", "time")["status"]
+    assert (status.loc[DAYS[0]:DAYS[3]] == 2).all() and (status.loc[DAYS[4]:] == tg.UNWRITTEN).all()
+    _build_overviews(repo, args)
+    _write_days(repo, src, prefix, args, DAYS[[3, *range(12, 20)]], MODIFIED + DAY)
+    _build_overviews(repo, args)
     _check_golden(_snapshot(repo), "overviews_analysis_golden.json")
 
 

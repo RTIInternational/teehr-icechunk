@@ -24,11 +24,17 @@ TEMPLATE_TRIES = 5
 
 
 def _open(source: GriddedSource, urls: list[str], args: IngestGriddedDataInput) -> dict[str, xr.Dataset]:
-    """Each file's virtual dataset by URL, preprocessed and with CF fill values; skipped files are left out."""
+    """Each file's virtual dataset by URL, preprocessed and with CF fill values; skipped files are left out, so the
+    result may be empty."""
     registry, parser, preprocess = source_reader(source, source.credentials(), args)
-    datasets = gu.open_virtual_datasets(
-        urls, registry, parser, ignore_unreadable_file=args.ignore_unreadable_file, preprocess=preprocess
-    )
+    try:
+        datasets = gu.open_virtual_datasets(
+            urls, registry, parser, ignore_unreadable_file=args.ignore_unreadable_file, preprocess=preprocess
+        )
+    except ValueError as e:
+        if str(e).startswith(gu.NO_VIRTUAL_DATASETS):  # every file was skipped
+            return {}
+        raise
     return {url: gu.align_virtual_fill_values(ds) for url, ds in datasets.items()}
 
 
@@ -76,6 +82,9 @@ def _check_layout(var: str, url: str, array: xr.DataArray, stored: zarr.Array, s
     parsed = array.data.metadata.to_dict()
     expected = stored.metadata.to_dict()
     stored_shape = dict(zip(stored.metadata.dimension_names, stored.shape))
+    steps = {d: n for d, n in zip(array.dims, array.shape) if d in step_dims}
+    if any(n != 1 for n in steps.values()):
+        raise ValueError(f"{url} holds {steps} steps of {var}; a parsed source has one step per file.")
     shape = {d: n for d, n in zip(array.dims, array.shape) if d not in step_dims}
     differs = [key for key in LAYOUT_KEYS if parsed.get(key) != expected.get(key)]
     if shape != {d: stored_shape.get(d) for d in shape}:

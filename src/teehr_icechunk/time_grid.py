@@ -473,7 +473,8 @@ def _slot_runs(
 def present_steps(session: ic.Session, group: str, variable: str, steps: pd.Index) -> np.ndarray:
     """Which ``steps`` hold a chunk of ``variable`` (its first chunk along the other dims), e.g. after files were skipped.
 
-    Asks the repo's manifests only (no chunk reads), all steps at once.
+    Asks the repo's manifests only (no chunk reads), all steps at once. Assumes a written step always has that chunk,
+    as files that store every tile do (e.g. NWM's HDF5).
     """
     arr = zarr.open_array(session.store, path=f"{group.strip('/')}/{variable}", mode="r", zarr_format=3)
     dims = list(arr.metadata.dimension_names)
