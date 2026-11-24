@@ -30,7 +30,8 @@ class PrefectRunner:
     """Runs each unit as a run of ``deployment`` ("<flow name>/<deployment name>"), as subflows of the caller.
 
     ``job_variables`` override the child's pod (e.g. its resources); ``timeout_seconds`` bounds the wait for
-    one child (None waits until it finishes; the child's own flow timeout still applies).
+    one child (None waits until it finishes; the child's own flow timeout still applies). A run of one unit
+    (e.g. a scheduled update) runs it in this process: a child pod would only add its start-up.
     """
 
     deployment: str
@@ -39,6 +40,9 @@ class PrefectRunner:
     timeout_seconds: float | None = None
 
     def run(self, work: UnitWork, units: Sequence[Unit]) -> list[UnitResult]:
+        if len(units) == 1:
+            return InProcessRunner().run(work, units)
+
         def run_one(unit: Unit) -> UnitResult:
             try:
                 flow_run = run_deployment(

@@ -59,3 +59,25 @@ def test_run_names_fit_kubernetes_job_names():
     name = ic_prefect.run_name(UNITS[0])
     assert name == f"process-gridded-unit-{UNITS[0].start:%Y%m%d%H}-{UNITS[0].end:%Y%m%d%H}"
     assert len(name) <= 45
+
+
+
+class Recorded:
+    def __init__(self):
+        self.ran = []
+
+    def __call__(self, unit):
+        self.ran.append(unit)
+
+    def parameters(self, unit):
+        return {}
+
+
+def test_a_single_unit_runs_in_the_parent(monkeypatch):
+    def no_child(*args, **kwargs):
+        raise AssertionError("no child run for a single unit")
+
+    monkeypatch.setattr(ic_prefect, "run_deployment", no_child)
+    work = Recorded()
+    results = ic_prefect.PrefectRunner("d", max_parallel=4).run(work, UNITS[:1])
+    assert work.ran == UNITS[:1] and results[0].error is None
