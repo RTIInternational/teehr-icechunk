@@ -85,8 +85,22 @@ class InProcessRunner:
         return results
 
 
+def assert_chunks_only(session: ic.Session) -> None:
+    """Raise if the session changed anything but chunks: only the parent creates groups and arrays and changes
+    their metadata, as concurrent units would otherwise overwrite each other's (Icechunk's rebase doesn't catch it)."""
+    diff = session.status()
+    changed = {
+        name: nodes for name in ("new_groups", "new_arrays", "deleted_groups", "deleted_arrays", "updated_groups",
+                                 "updated_arrays", "moved_nodes")
+        if (nodes := getattr(diff, name))
+    }
+    if changed:
+        raise RuntimeError(f"A unit may only write chunks, but it changed {changed}.")
+
+
 def commit_unit(session: ic.Session, message: str) -> str:
     """Commit a unit's chunks, rebasing over units committed since its session started."""
+    assert_chunks_only(session)
     return session.commit(message, rebase_with=ic.ConflictDetector(), rebase_tries=10)
 
 

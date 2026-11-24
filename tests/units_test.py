@@ -60,3 +60,18 @@ def test_units_commit_disjoint_chunks_from_the_same_snapshot(tmp_path):
         commit_unit(s, f"unit {start}")
     stored = zarr.open_array(repo.readonly_session("main").store, path="v", mode="r")[:]
     assert (stored[:30] == 0).all() and (stored[30:] == 30).all()
+
+
+def test_a_unit_may_only_write_chunks(tmp_path):
+    """Metadata belongs to the parent: a unit that resized an array or changed attrs is refused before committing."""
+    repo = ic.Repository.create(ic.local_filesystem_storage(str(tmp_path / "repo")))
+    session = repo.writable_session("main")
+    zarr.create_array(session.store, name="v", shape=(60, 4), chunks=(30, 4), dtype="float32", fill_value=np.nan)
+    session.commit("prepare")
+    for change in (lambda a: a.resize((90, 4)), lambda a: a.attrs.update(units="mm")):
+        session = repo.writable_session("main")
+        arr = zarr.open_array(session.store, path="v")
+        arr[:30] = 1
+        change(arr)
+        with pytest.raises(RuntimeError, match="only write chunks"):
+            commit_unit(session, "unit")

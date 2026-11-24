@@ -8,6 +8,7 @@ Forecast repos add fixed axes after the append axis (``reference_time``), e.g. `
 ``lead_time``, set when the repo is created and never appended. Each (cycle, member, lead) step is
 a slot with its own metadata, and ``value_time`` (reference + lead) is a 2-D coordinate.
 """
+import asyncio
 from typing import Literal
 
 import icechunk as ic
@@ -16,6 +17,7 @@ import pandas as pd
 import xarray as xr
 import zarr
 from icechunk.xarray import to_icechunk
+from zarr.core.sync import sync
 from virtualizarr.manifests import ChunkManifest, ManifestArray
 
 from teehr_icechunk.repo_const import (
@@ -424,27 +426,68 @@ def region_write(
     With ``fixed_dims``, ``ds`` is a block of steps: its values along each fixed axis must be a
     contiguous run of the stored ones (e.g. leads 3-6 of a cycle).
     """
+    ds, runs, fixed_region = _slot_runs(session, group, ds, dim, fixed_dims)
+    # Region writes take only variables along dim; the rest were written when the group was created
+    ds = ds.drop_vars([n for n, v in ds.variables.items() if dim not in v.dims])
+    for run, _ in runs:
+        part = ds.isel({dim: run})
+        if virtual:
+            part.vz.to_icechunk(session.store, group=group, region={dim: "auto", **fixed_region})
+        else:
+            to_icechunk(part, session, group=group, region={dim: "auto", **fixed_region})
+
+
+def write_chunks(session: ic.Session, group: str, ds: xr.Dataset, dim: str, fixed_dims: tuple[str, ...] = ()) -> None:
+    """Write ``ds``'s data variables into the slots of its steps, and nothing else.
+
+    For writers that commit concurrently (the run model's units): unlike ``region_write``, no coordinates, step
+    metadata or attributes are written, so only chunks change. Values are encoded as the arrays store them.
+    """
+    ds, runs, fixed_region = _slot_runs(session, group, ds, dim, fixed_dims)
+    ds = ds.drop_vars(list(ds.coords))
+    for run, slots in runs:
+        to_icechunk(ds.isel({dim: run}), session, group=group, region={dim: slots, **fixed_region}, mode="r+")
+
+
+def _slot_runs(
+    session: ic.Session, group: str, ds: xr.Dataset, dim: str, fixed_dims: tuple[str, ...]
+) -> tuple[xr.Dataset, list[tuple[np.ndarray, slice]], dict[str, slice]]:
+    """``ds`` in slot order, its runs of contiguous slots (positions in ``ds``, slots), and its fixed axes' slots."""
     stored = xr.open_zarr(session.store, group=group, consolidated=False, chunks=None)
-    region = {}
+    fixed_region = {}
     for name in fixed_dims:
         pos = stored[name].to_index().get_indexer(ds[name].values)
         if (pos < 0).any() or (np.diff(pos) != 1).any():
             raise ValueError(f"{name} {list(ds[name].values)} isn't a contiguous run of {group}'s {list(stored[name].values)}.")
-        region[name] = slice(int(pos[0]), int(pos[-1]) + 1)
+        fixed_region[name] = slice(int(pos[0]), int(pos[-1]) + 1)
     times = pd.DatetimeIndex(ds[dim].values)
     pos = stored[dim].to_index().get_indexer(times)
     if (pos < 0).any():
         raise ValueError(f"{(pos < 0).sum()} step(s) are not on {group}'s time axis, e.g. {times[pos < 0][0]}.")
     order = np.argsort(pos)
     ds, pos = ds.isel({dim: order}), pos[order]
-    # Region writes take only variables along dim; the rest were written when the group was created
-    ds = ds.drop_vars([n for n, v in ds.variables.items() if dim not in v.dims])
-    for run in np.split(np.arange(len(pos)), np.flatnonzero(np.diff(pos) != 1) + 1):
-        part = ds.isel({dim: run})
-        if virtual:
-            part.vz.to_icechunk(session.store, group=group, region={dim: "auto", **region})
-        else:
-            to_icechunk(part, session, group=group, region={dim: "auto", **region})
+    runs = np.split(np.arange(len(pos)), np.flatnonzero(np.diff(pos) != 1) + 1)
+    return ds, [(run, slice(int(pos[run[0]]), int(pos[run[-1]]) + 1)) for run in runs], fixed_region
+
+
+def present_steps(session: ic.Session, group: str, variable: str, steps: pd.Index) -> np.ndarray:
+    """Which ``steps`` hold a chunk of ``variable`` (its first chunk along the other dims), e.g. after files were skipped.
+
+    Asks the repo's manifests only (no chunk reads), all steps at once.
+    """
+    arr = zarr.open_array(session.store, path=f"{group.strip('/')}/{variable}", mode="r", zarr_format=3)
+    dims = list(arr.metadata.dimension_names)
+    axes = xr.open_zarr(session.store, group=group, consolidated=False, chunks=None)
+    # Times, or forecast steps (append axis, *fixed axes)
+    names = list(steps.names) if isinstance(steps, pd.MultiIndex) else dims[:1]
+    levels = [steps.get_level_values(d) for d in names] if isinstance(steps, pd.MultiIndex) else [steps]
+    positions = dict(zip(names, (axes[d].to_index().get_indexer(level) for d, level in zip(names, levels))))
+    coords = np.column_stack([positions[d] if d in positions else np.zeros(len(steps), int) for d in dims])
+
+    async def types():
+        return await asyncio.gather(*(session.chunk_type_async(f"/{arr.path}", [int(i) for i in c]) for c in coords))
+
+    return np.array([kind != ic.ChunkType.uninitialized for kind in sync(types())], bool)
 
 
 def select_source_steps(listing: pd.DataFrame, stored: pd.DataFrame | None, mode: WriteMode) -> pd.DataFrame:
