@@ -115,7 +115,9 @@ class RefsWork:
         files = source.list_source_files(max(unit.start, self.start), min(unit.end, self.end))
         stored = tg.read_step_metadata(self.repo.readonly_session("main").store, REFERENCES_GROUP_PATH, dim)
         todo = tg.select_source_steps(source.steps_from_files(files), stored, self.args.write_mode)
-        # Files published since the parent's listing can be past the prepared axis; the next run takes them
+        # Only the unit's own slots, even if the source lists more: neighbouring units write theirs, and the parent
+        # records each unit's steps. Files published since the parent's listing can't be past its slots either.
+        todo = todo.loc[unit.select(todo.index, dim)]
         todo = todo[todo.index.get_level_values(dim) <= stored.index.get_level_values(dim).max()]
         if todo.empty:
             return

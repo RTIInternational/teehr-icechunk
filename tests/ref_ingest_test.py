@@ -18,6 +18,7 @@ from teehr_icechunk.data_status import with_status
 from teehr_icechunk.models import IngestGriddedDataInput
 from teehr_icechunk.repo_const import LEAD_TIME, NOT_EXPECTED, REFERENCE_TIME, STATUS_COORD, UNWRITTEN
 from teehr_icechunk.sources import IndexSource, ParsedSource, listing_frame
+from teehr_icechunk.units import UnitResult
 
 ORIGIN = pd.Timestamp("2000-01-01")
 SHAPE = (2, 3)
@@ -318,3 +319,37 @@ def test_a_written_step_whose_newer_file_cant_be_read_fails_its_unit(parsed):
         ref_ingest.ingest_references(args, pd.Timestamp("2000-01-02"), pd.Timestamp("2000-01-04"), repo=repo)
     after = tg.read_step_metadata(repo.readonly_session("main").store, "/references", "time")
     assert after.loc["2000-01-03", "source_last_modified"] == before.loc["2000-01-03", "source_last_modified"]
+
+
+class OnlyMiddleUnit:
+    """Runs the middle unit and reports the others as failed."""
+
+    def run(self, work, units, on_done=None):
+        results = [UnitResult(u, "not run") for u in units]
+        work(units[1])
+        results[1] = UnitResult(units[1])
+        for result in results:
+            on_done(result)
+        return results
+
+
+def test_a_unit_writes_only_its_own_slots(parsed, monkeypatch):
+    """A source may list files beyond a unit's slots (e.g. NWM selects by cycle, two hours after the valid time);
+    a unit writes only its own steps, so steps never fall between units or land unrecorded in a neighbour's."""
+    src, args, new_repo = parsed
+    repo = new_repo("repo")
+    real = FakeParsedSource.list_files
+
+    def wider(self, start_dt, end_dt):  # two days either side of what was asked
+        return real(self, pd.Timestamp(start_dt) - pd.Timedelta("2D"), pd.Timestamp(end_dt) + pd.Timedelta("2D"))
+
+    monkeypatch.setattr(FakeParsedSource, "list_files", wider)
+    with pytest.raises(RuntimeError, match="2 of 3 unit"):
+        ref_ingest.ingest_references(args, pd.Timestamp("2000-01-04"), pd.Timestamp("2000-01-10"), repo=repo,
+                                     runner=OnlyMiddleUnit(), unit_steps=args.unit_steps)
+    session = repo.readonly_session("main")
+    days = pd.date_range("2000-01-02", "2000-01-12", name="time")
+    present = days[tg.present_steps(session, "/references", "v", days)]
+    assert list(present.strftime("%d")) == ["06", "07"]  # the middle unit is Jan 5-8; the 5th and 8th have no file
+    meta = tg.read_step_metadata(session.store, "/references", "time")
+    assert list(meta.index[meta[STATUS_COORD] >= 0].strftime("%d")) == ["06", "07"]
