@@ -7,6 +7,7 @@ import icechunk as ic
 import numpy as np
 import pandas as pd
 import xarray as xr
+from obspec_utils.registry import ObjectStoreRegistry
 
 from teehr_icechunk import grid_utils as gu
 from teehr_icechunk import time_grid as tg
@@ -47,19 +48,26 @@ def _parser(parser_type: ParserType, **kwargs):
     return vz.parsers.ZarrParser(**kwargs)
 
 
-def virtual_blocks(
-    todo: pd.DataFrame, source: GriddedSource, credentials: dict, args: IngestGriddedDataInput
-) -> list[xr.Dataset]:
-    """Virtual references to the files in ``todo``: one dataset for an analysis source, or forecast blocks of steps."""
+def source_reader(
+    source: GriddedSource, credentials: dict, args: IngestGriddedDataInput
+) -> tuple[ObjectStoreRegistry, object, Callable[[xr.Dataset, str], xr.Dataset]]:
+    """What parses the source's files: its object store registry, the format's parser, and per-file preprocessing."""
     obstore_kwargs = {**source.store_kwargs, **credentials, **args.obstore_kwargs}
     if credentials:
         # An unsigned request ignores the credentials
         obstore_kwargs.pop("skip_signature", None)
     registry = gu.create_objectstore_registry(source.source_bucket, **obstore_kwargs)
-    parser = _parser(args.parser_type, **source.parser_kwargs)
+    return registry, _parser(args.parser_type, **source.parser_kwargs), _preprocess(source, args)
+
+
+def virtual_blocks(
+    todo: pd.DataFrame, source: GriddedSource, credentials: dict, args: IngestGriddedDataInput
+) -> list[xr.Dataset]:
+    """Virtual references to the files in ``todo``: one dataset for an analysis source, or forecast blocks of steps."""
+    registry, parser, preprocess = source_reader(source, credentials, args)
     fixed = source.fixed_axes()
     if fixed:
-        blocks = create_forecast_blocks(todo, fixed, registry, parser, _preprocess(source, args), args)
+        blocks = create_forecast_blocks(todo, fixed, registry, parser, preprocess, args)
     else:
         blocks = [gu.create_virtual_xarray_dataset(
             todo["url"].tolist(),
@@ -67,7 +75,7 @@ def virtual_blocks(
             parser=parser,
             concat_dim=args.append_dim,
             ignore_unreadable_file=args.ignore_unreadable_file,
-            preprocess=_preprocess(source, args),
+            preprocess=preprocess,
             **args.xconcat_kwargs
         )]
     return [_standardize_references(gu.align_virtual_fill_values(block), args) for block in blocks]

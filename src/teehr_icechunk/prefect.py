@@ -13,7 +13,7 @@ from typing import Sequence
 import pandas as pd
 from prefect.deployments import run_deployment
 
-from teehr_icechunk import index_ingest, overviews
+from teehr_icechunk import overviews, ref_ingest
 from teehr_icechunk.models import BuildOverviewsDataInput
 from teehr_icechunk.units import InProcessRunner, Runner, Unit, UnitResult, UnitWork
 
@@ -75,8 +75,8 @@ def run_unit(args: BuildOverviewsDataInput, unit: dict, window: dict | None = No
     if stage == "overviews":
         work = overviews.OverviewWork(overviews.open_repo(args), args)
     elif stage == "references":
-        repo = index_ingest.open_repo(args)
-        work = index_ingest.IndexRefsWork(repo, args, pd.Timestamp(window["start"]), pd.Timestamp(window["end"]))
+        repo = ref_ingest.open_repo(args)
+        work = ref_ingest.RefsWork(repo, args, pd.Timestamp(window["start"]), pd.Timestamp(window["end"]))
     else:
         raise ValueError(f"Unknown stage {stage!r}; 'references' or 'overviews'.")
     work(Unit.from_dict(unit))

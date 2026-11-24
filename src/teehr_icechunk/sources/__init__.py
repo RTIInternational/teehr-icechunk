@@ -6,6 +6,7 @@ from typing import ClassVar
 import numpy as np
 import pandas as pd
 import xarray as xr
+import zarr
 from pydantic import BaseModel
 
 from teehr_icechunk.packed_encoding import PackedEncoding
@@ -102,13 +103,16 @@ class GriddedSource(BaseModel, ABC):
         return ds
 
 
-class IndexSource(GriddedSource):
-    """A source whose references come from its files' indexes (e.g. GRIB2 ``.idx``), not from parsing the files.
+class ReferenceSource(GriddedSource):
+    """A source whose references are written on the run model (``ref_ingest``): in units, each listing its files,
+    building a reference table from them and writing it, in the parent or fanned out as child runs.
 
-    One file may hold many steps and a step many files, so the source lists its files, turns them into steps
-    and builds a reference table (``refs.REF_COLUMNS`` indexed by step) itself; ``template`` gives one step of
-    empty virtual arrays to create the repo from.
+    The source lists its files, turns them into steps and builds a reference table (``refs.REF_COLUMNS`` indexed by
+    step) from them; ``template`` gives the empty virtual arrays to create the repo from.
     """
+
+    # Steps per manifest split when the repo is created; units hold whole splits. None leaves manifests unsplit
+    manifest_split_steps: ClassVar[int | None] = None
 
     @abstractmethod
     def list_source_files(self, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
@@ -119,15 +123,62 @@ class IndexSource(GriddedSource):
         """The step listing (``LISTING_COLUMNS``, indexed like ``list_files``) of ``list_source_files`` rows."""
 
     @abstractmethod
-    def reference_table(self, files: pd.DataFrame) -> pd.DataFrame:
-        """References to the messages in ``files``: ``refs.REF_COLUMNS`` indexed by step."""
+    def reference_table(self, files: pd.DataFrame, args, stored: zarr.Group) -> pd.DataFrame:
+        """References to the chunks in ``files``: ``refs.REF_COLUMNS`` indexed by step.
+
+        ``args`` are the run's ``IngestGriddedDataInput``; ``stored`` is the group the references go into.
+        """
 
     @abstractmethod
-    def template(self) -> xr.Dataset:
-        """One step of empty virtual arrays, with coordinates, attrs and CRS, for creating the repo."""
+    def template(self, files: pd.DataFrame, args) -> xr.Dataset:
+        """Empty virtual arrays, with coordinates, attrs and CRS, for creating the repo; ``files`` are listed ones."""
+
+    def uses_run_model(self) -> bool:
+        """Whether runs write this source's references on the run model; False keeps a configuration on the older,
+        one-commit path."""
+        return True
+
+    def files_for_steps(self, files: pd.DataFrame, steps: pd.Index) -> pd.DataFrame:
+        """The ``files`` holding ``steps``: all of them, unless the source can tell."""
+        return files
+
+
+class IndexSource(ReferenceSource):
+    """A source whose references come from its files' indexes (e.g. GRIB2 ``.idx``), not from parsing the files.
+
+    One file may hold many steps and a step many files.
+    """
 
     def list_files(self, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
         return self.steps_from_files(self.list_source_files(start_dt, end_dt))
+
+
+class ParsedSource(ReferenceSource):
+    """A source of one file per step whose references come from parsing each file (HDF5, NetCDF4, GeoTIFF), with
+    the run's parser (``parser_type``, the format's extra).
+
+    Its file listing is its step listing (``list_files``). Every file must be laid out as the repo's arrays.
+    """
+
+    def list_source_files(self, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+        return self.list_files(start_dt, end_dt)
+
+    def steps_from_files(self, files: pd.DataFrame) -> pd.DataFrame:
+        return files
+
+    def files_for_steps(self, files: pd.DataFrame, steps: pd.Index) -> pd.DataFrame:
+        return files[files.index.isin(steps)]
+
+    def reference_table(self, files: pd.DataFrame, args, stored: zarr.Group) -> pd.DataFrame:
+        from teehr_icechunk import parser_refs
+
+        return parser_refs.reference_table(self, files, args, stored)
+
+    def template(self, files: pd.DataFrame, args) -> xr.Dataset:
+        from teehr_icechunk import parser_refs
+
+        return parser_refs.template(self, files, args)
+
 
 def listing_frame(rows: list[dict], index: tuple[str, ...] = ("time",)) -> pd.DataFrame:
     """A source listing (``LISTING_COLUMNS``) from row dicts, indexed by ``index`` and sorted."""
