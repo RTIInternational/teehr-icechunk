@@ -17,6 +17,7 @@ from pyproj import CRS as PyprojCRS
 import zarr
 import logging
 import os
+import warnings
 import rioxarray  # noqa: F401 (rio accessor)
 
 from teehr_icechunk.concurrency import map_blocking, resolve_budget, run_sync, use_process_pool
@@ -263,6 +264,11 @@ def _open_virtual_safe(
             raise
         return None, f"Corrupt or unreadable file skipped: {url} ({e})"
 
+
+# Parsing a file declares each of its variables in Zarr v3 terms; byte strings (e.g. NWM's one-character `crs`)
+# warn that their type has no settled v3 spec, once per file. Ingests keep only gridded variables, so none is
+# ever stored. Set at import, so the parse workers (which import this module) skip it too.
+warnings.filterwarnings("ignore", message=r"The data type \(NullTerminatedBytes", category=zarr.errors.UnstableSpecificationWarning)
 
 # open_virtual_datasets' error when every file was skipped
 NO_VIRTUAL_DATASETS = "No virtual datasets were created"
