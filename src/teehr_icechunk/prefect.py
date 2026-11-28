@@ -14,7 +14,7 @@ import pandas as pd
 from prefect.deployments import run_deployment
 
 from teehr_icechunk import overviews, ref_ingest
-from teehr_icechunk.models import BuildOverviewsDataInput
+from teehr_icechunk.models import BuildOverviewsDataInput, FanOutInput
 from teehr_icechunk.segments import InProcessRunner, OnDone, Runner, Segment, SegmentResult, SegmentWork
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ class PrefectRunner:
         return results
 
 
-def runner(args: BuildOverviewsDataInput, deployment: str) -> Runner:
+def runner(args: FanOutInput, deployment: str) -> Runner:
     """Segments as runs of ``deployment``, ``args.max_child_runs`` at a time, or in this process when that is 0."""
     if args.max_child_runs:
         return PrefectRunner(deployment, args.max_child_runs, args.child_job_variables)
