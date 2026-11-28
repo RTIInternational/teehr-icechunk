@@ -440,7 +440,7 @@ def region_write(
 def write_chunks(session: ic.Session, group: str, ds: xr.Dataset, dim: str, fixed_dims: tuple[str, ...] = ()) -> None:
     """Write ``ds``'s data variables into the slots of its steps, and nothing else.
 
-    For writers that commit concurrently (the run model's units): unlike ``region_write``, no coordinates, step
+    For writers that commit concurrently (the run model's segments): unlike ``region_write``, no coordinates, step
     metadata or attributes are written, so only chunks change. Values are encoded as the arrays store them.
     """
     ds, runs, fixed_region = _slot_runs(session, group, ds, dim, fixed_dims)

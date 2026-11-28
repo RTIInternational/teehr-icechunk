@@ -130,14 +130,14 @@ class BuildOverviewsDataInput(BaseGriddedDataInput):
         default=0,
         ge=0,
         description=(
-            "Units run at once as child flow runs (fan-out across pods); 0 runs every unit in this run. Applies "
+            "Segments run at once as child flow runs (fan-out across pods); 0 runs every segment in this run. Applies "
             "to overviews, and to references from sources on the run model"
         )
     )
-    unit_steps: int = Field(
+    segment_steps: int = Field(
         default=365,
         gt=0,
-        description="Append-axis slots per unit of work, rounded up to whole shards and manifest splits"
+        description="Append-axis slots per segment, rounded up to whole shards and manifest splits"
     )
     child_job_variables: dict[str, Any] = Field(
         default_factory=dict,

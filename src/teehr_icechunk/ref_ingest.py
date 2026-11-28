@@ -3,8 +3,8 @@
 
 A reference source lists its files (``list_source_files``), turns them into steps (``steps_from_files``) and
 builds a reference table from them (``reference_table``); it also gives an empty ``template`` of its arrays.
-The parent prepares ``/references``, runs the units (in-process, or as child runs through a ``Runner``),
-then records step metadata for the units that succeeded.
+The parent prepares ``/references``, runs the segments (in-process, or as child runs through a ``Runner``),
+then records step metadata for the segments that succeeded.
 """
 import logging
 from dataclasses import dataclass
@@ -32,8 +32,8 @@ from teehr_icechunk.repo_const import (
     TIMESERIES_TYPE_ATTR,
 )
 from teehr_icechunk.sources import ParsedSource
-from teehr_icechunk.units import (
-    InProcessRunner, Runner, Unit, UnitResult, commit_rebasing, commit_unit, plan_units, raise_failed, unit_slots,
+from teehr_icechunk.segments import (
+    InProcessRunner, Runner, Segment, SegmentResult, commit_rebasing, commit_segment, plan_segments, raise_failed, segment_slots,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ def open_repo(args: IngestGriddedDataInput) -> ic.Repository:
 def prepare(repo: ic.Repository, args: IngestGriddedDataInput, end: pd.Timestamp, listing: pd.DataFrame) -> None:
     """Create ``/references`` (or extend its axis to ``end``) and mark slots the source never publishes, in one commit.
 
-    Every array and axis exists before any unit runs, so units only write chunks. A new repo's arrays come from the
+    Every array and axis exists before any segment runs, so segments only write chunks. A new repo's arrays come from the
     source's template (e.g. the first readable file of ``listing``).
     """
     source, dim = args.source, args.append_dim
@@ -99,7 +99,7 @@ def prepare(repo: ic.Repository, args: IngestGriddedDataInput, end: pd.Timestamp
 
 @dataclass
 class RefsWork:
-    """One unit's references within the run's window: list its files, keep the steps the write mode selects,
+    """One segment's references within the run's window: list its files, keep the steps the write mode selects,
     write and commit.
 
     Runs in the parent (``InProcessRunner``) or in a child run rebuilt from ``parameters``.
@@ -110,14 +110,14 @@ class RefsWork:
     start: pd.Timestamp
     end: pd.Timestamp
 
-    def __call__(self, unit: Unit) -> None:
+    def __call__(self, segment: Segment) -> None:
         source, dim = self.args.source, self.args.append_dim
-        files = source.list_source_files(max(unit.start, self.start), min(unit.end, self.end))
+        files = source.list_source_files(max(segment.start, self.start), min(segment.end, self.end))
         stored = tg.read_step_metadata(self.repo.readonly_session("main").store, REFERENCES_GROUP_PATH, dim)
         todo = tg.select_source_steps(source.steps_from_files(files), stored, self.args.write_mode)
-        # Only the unit's own slots, even if the source lists more: neighbouring units write theirs, and the parent
-        # records each unit's steps. Files published since the parent's listing can't be past its slots either.
-        todo = todo.loc[unit.select(todo.index, dim)]
+        # Only the segment's own slots, even if the source lists more: neighbouring segments write theirs, and the parent
+        # records each segment's steps. Files published since the parent's listing can't be past its slots either.
+        todo = todo.loc[segment.select(todo.index, dim)]
         todo = todo[todo.index.get_level_values(dim) <= stored.index.get_level_values(dim).max()]
         if todo.empty:
             return
@@ -127,16 +127,16 @@ class RefsWork:
         refs = refs[refs.index.isin(todo.index)]
         _check_rewrites_read(todo.index.difference(refs.index.unique()), stored)
         n = write_virtual_refs(session, REFERENCES_GROUP_PATH, refs)
-        commit_unit(session, f"References for {len(todo)} step(s), {unit.start} to {unit.end}")
-        logger.info(f"Wrote {n} reference(s) for {len(todo)} step(s) from {unit.start} to {unit.end}.")
+        commit_segment(session, f"References for {len(todo)} step(s), {segment.start} to {segment.end}")
+        logger.info(f"Wrote {n} reference(s) for {len(todo)} step(s) from {segment.start} to {segment.end}.")
 
-    def parameters(self, unit: Unit) -> dict:
+    def parameters(self, segment: Segment) -> dict:
         window = {"start": self.start.isoformat(), "end": self.end.isoformat()}
-        return {"stage": "references", "args": self.args.model_dump(mode="json"), "unit": unit.to_dict(), "window": window}
+        return {"stage": "references", "args": self.args.model_dump(mode="json"), "segment": segment.to_dict(), "window": window}
 
 
 def _check_rewrites_read(skipped: pd.Index, stored: pd.DataFrame) -> None:
-    """Fail the unit if a step already written was to be rewritten but its file couldn't be read: recording the newer
+    """Fail the segment if a step already written was to be rewritten but its file couldn't be read: recording the newer
     file would leave the older references in place, checked against the older file, and never retried."""
     written = skipped[(stored[STATUS_COORD].reindex(skipped) >= 0).to_numpy()]
     if len(written):
@@ -151,13 +151,13 @@ def ingest_references(
     start: pd.Timestamp,
     end: pd.Timestamp,
     runner: Runner | None = None,
-    unit_steps: int = 365,
+    segment_steps: int = 365,
     repo: ic.Repository | None = None,
-) -> list[UnitResult]:
-    """Write ``/references`` for the source's steps from ``start`` to ``end``; returns each unit's outcome.
+) -> list[SegmentResult]:
+    """Write ``/references`` for the source's steps from ``start`` to ``end``; returns each segment's outcome.
 
-    Units hold about ``unit_steps`` append-axis slots, aligned to the source's manifest splits. Step metadata
-    is recorded for each unit that succeeds, as it finishes; a failed unit is retried by the next run.
+    Segments hold about ``segment_steps`` append-axis slots, aligned to the source's manifest splits. Step metadata
+    is recorded for each segment that succeeds, as it finishes; a failed segment is retried by the next run.
     """
     source, dim = args.source, args.append_dim
     repo = repo or open_repo(args)
@@ -171,16 +171,16 @@ def ingest_references(
     times = todo.index.get_level_values(dim)
     prepare(repo, args, times.max(), todo)
     split = getattr(source, "manifest_split_steps", None)
-    units = plan_units(times, source.time_origin(), source.time_step, unit_slots(unit_steps, *([split] if split else [])))
-    logger.info(f"Running {len(units)} unit(s).")
+    segments = plan_segments(times, source.time_origin(), source.time_step, segment_slots(segment_steps, *([split] if split else [])))
+    logger.info(f"Running {len(segments)} segment(s).")
 
-    def record(result: UnitResult) -> None:
+    def record(result: SegmentResult) -> None:
         if result.error is not None:
             return
-        steps = todo.loc[result.unit.select(todo.index, dim)]
+        steps = todo.loc[result.segment.select(todo.index, dim)]
         session = repo.writable_session("main")
         if isinstance(source, ParsedSource):
-            # Files the unit skipped as missing or unreadable left their (new) steps without chunks
+            # Files the segment skipped as missing or unreadable left their (new) steps without chunks
             present = tg.present_steps(session, REFERENCES_GROUP_PATH, args.variable_names[0], steps.index)
             if not present.all():
                 logger.warning(f"{(~present).sum()} step(s) were skipped (missing or unreadable files).")
@@ -193,10 +193,10 @@ def ingest_references(
             source_last_modified=steps["last_modified"].to_numpy("datetime64[ms]"),
             updated_at=tg.utc_now(),
         )
-        commit_rebasing(session, f"Recorded {len(steps)} step(s), {result.unit.start} to {result.unit.end}")
-        logger.info(f"Recorded {len(steps)} step(s) from {result.unit.start} to {result.unit.end}.")
+        commit_rebasing(session, f"Recorded {len(steps)} step(s), {result.segment.start} to {result.segment.end}")
+        logger.info(f"Recorded {len(steps)} step(s) from {result.segment.start} to {result.segment.end}.")
 
     work = RefsWork(repo, args, pd.Timestamp(start), pd.Timestamp(end))
-    results = (runner or InProcessRunner()).run(work, units, on_done=record)
+    results = (runner or InProcessRunner()).run(work, segments, on_done=record)
     raise_failed(results)
     return results

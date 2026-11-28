@@ -33,7 +33,7 @@ def package_boundaries():
     p.group("grp-clients", "Client deployments", 980, 60, 520, 210)
     p.box("hub", tb("teehr-hub", "Sources (NWM forcing), input models, Prefect flows and deployments"), CLIENT, 1005, 100, 230, 90)
     p.box("fved", tb("teehr-fved", "Sources (snow), input models, Prefect flows and deployments"), CLIENT, 1250, 100, 230, 90)
-    p.box("client-note", "Mean areal ingest: polygon layers in; Arrow batches mapped to teehr names and units and written", NOTE, 1005, 200, 475, 50)
+    p.box("client-note", "Mean areal ingest: polygon layers in; Arrow batches mapped to teehr names and segments and written", NOTE, 1005, 200, 475, 50)
 
     p.box("fetch", tb("Fetch package (ADR-0015)", "Tabular sources (USGS, RFC); NWM streamflow read from our repos; gridded weights and means through teehr-icechunk"), FETCH, 980, 470, 280, 110)
     p.box("warehouse", tb("Warehouse (v1)", "Written through teehr-core's shared writer, teehr_core.warehouse (ADR-0019)"), STORE, 1320, 470, 180, 110)
@@ -89,41 +89,41 @@ def gridded_workflow():
     p.box("src", tb("Source files", "HDF5 / NetCDF, GeoTIFF, GRIB2 + .idx"), EXT, 20, 60, 180, 80)
     p.box("list", tb("List and select", "Source listing by step; append / upsert against the stored step metadata"), ICECHUNK, 240, 60, 200, 80)
     p.box("prep", tb("Prepare (parent)", "Groups, axes and root attributes; NOT_EXPECTED slots; one commit"), ICECHUNK, 480, 60, 200, 80)
-    p.box("plan", tb("Plan units", "Whole shards and manifest splits along the append axis"), ICECHUNK, 720, 60, 200, 80)
+    p.box("plan", tb("Plan segments", "Whole shards and manifest splits along the append axis"), ICECHUNK, 720, 60, 200, 80)
     p.box("run", tb("Runner", "In-process (daily runs) or Prefect child runs (backfills)"), ICECHUNK, 960, 60, 200, 80)
-    p.box("meta", tb("Record steps (parent)", "Status and audit times of the units that succeeded; one commit"), ICECHUNK, 1200, 60, 260, 80)
+    p.box("meta", tb("Record steps (parent)", "Status and audit times of the segments that succeeded; one commit"), ICECHUNK, 1200, 60, 260, 80)
     for i, (a, b) in enumerate((("src", "list"), ("list", "prep"), ("prep", "plan"), ("plan", "run"), ("run", "meta"))):
         p.edge(f"e-flow{i}", a, b)
-    p.group("grp-unit", "A unit's stages (each writes chunks only and commits with rebase)", 240, 200, 920, 150)
+    p.group("grp-segment", "A segment's stages (each writes chunks only and commits with rebase)", 240, 200, 920, 150)
     p.box("refs", tb("/references", "IdxRefs (GRIB2 .idx) or ParserRefs (HDF5 / NetCDF, GeoTIFF, Zarr), written with set_virtual_refs"), STORE, 270, 230, 260, 100)
     p.box("data", tb("/data (optional)", "Materialized copy, rechunked and sharded"), STORE, 580, 230, 240, 100)
     p.box("ov", tb("/overviews/&lt;factor&gt;", "Block means for zoomed-out tiles"), STORE, 870, 230, 260, 100)
     p.edge("e-rd", "refs", "data")
     p.edge("e-do", "data", "ov")
-    p.edge("e-run-unit", "run", "grp-unit", "runs", "exitX=0.5;exitY=1;entryX=0.9;entryY=0;")
+    p.edge("e-run-segment", "run", "grp-segment", "runs", "exitX=0.5;exitY=1;entryX=0.9;entryY=0;")
     p.box("readers", tb("Readers", "open_grid_dataset (ours or external repos); xpublish tiles / EDR; zonal_means → Arrow batches"), EXT, 240, 420, 920, 70)
-    p.edge("e-read", "grp-unit", "readers", "", "exitX=0.5;exitY=1;entryX=0.5;entryY=0;")
-    p.box("note", "Every source runs on units; a new variable is an add-variables run over the steps already written", NOTE, 240, 520, 920, 40)
+    p.edge("e-read", "grp-segment", "readers", "", "exitX=0.5;exitY=1;entryX=0.5;entryY=0;")
+    p.box("note", "Every source runs on segments; a new variable is an add-variables run over the steps already written", NOTE, 240, 520, 920, 40)
     p.legend(1240, 230, [(ICECHUNK, "teehr-icechunk step"), (STORE, "Repo group"), (EXT, "External")], width=220)
     return p
 
 
 def run_model():
     p = Page("Run model and fan-out", 1300, 640)
-    p.box("parent", tb("Parent flow run", "List, select, prepare (one commit), plan units"), ICECHUNK, 40, 60, 260, 90)
-    p.box("prefect", tb("PrefectRunner ([prefect] extra)", "Backfills: one child run per unit via run_deployment, at most max_child_runs at a time"), ICECHUNK, 380, 50, 280, 90)
-    p.box("inproc", tb("In-process runner", "Daily runs: units one after another in the parent's pod"), ICECHUNK, 380, 200, 280, 80)
-    p.group("grp-children", "Child runs (process-gridded-unit), one pod each", 740, 30, 500, 300)
+    p.box("parent", tb("Parent flow run", "List, select, prepare (one commit), plan segments"), ICECHUNK, 40, 60, 260, 90)
+    p.box("prefect", tb("PrefectRunner ([prefect] extra)", "Backfills: one child run per segment via run_deployment, at most max_child_runs at a time"), ICECHUNK, 380, 50, 280, 90)
+    p.box("inproc", tb("In-process runner", "Daily runs: segments one after another in the parent's pod"), ICECHUNK, 380, 200, 280, 80)
+    p.group("grp-children", "Child runs (process-gridded-segment), one pod each", 740, 30, 500, 300)
     for i, y in enumerate((70, 160, 250)):
-        p.box(f"child{i}", tb(f"Unit {i + 1}", "Writes its chunks, commits with rebase over the other units"), CLIENT, 770, y, 440, 60)
+        p.box(f"child{i}", tb(f"Segment {i + 1}", "Writes its chunks, commits with rebase over the other segments"), CLIENT, 770, y, 440, 60)
         p.edge(f"e-pf-c{i}", "prefect", f"child{i}", "", f"exitX=1;exitY={0.3 + 0.2 * i};entryX=0;entryY=0.5;")
-    p.box("repo", tb("Icechunk repo", "Units never share a chunk or manifest split; only the parent writes step metadata"), STORE, 380, 430, 330, 110)
-    p.box("record", tb("Parent records steps", "For units that succeeded; failed units stay unwritten and the next run retries them"), ICECHUNK, 40, 430, 220, 110)
+    p.box("repo", tb("Icechunk repo", "Segments never share a chunk or manifest split; only the parent writes step metadata"), STORE, 380, 430, 330, 110)
+    p.box("record", tb("Parent records steps", "For segments that succeeded; failed segments stay unwritten and the next run retries them"), ICECHUNK, 40, 430, 220, 110)
     p.edge("e-p-pf", "parent", "prefect", "", "exitX=1;exitY=0.4;entryX=0;entryY=0.5;")
     p.edge("e-p-in", "parent", "inproc", "", "exitX=1;exitY=0.8;entryX=0;entryY=0.5;")
     p.edge("e-in-repo", "inproc", "repo", "chunk commits", "exitX=0.5;exitY=1;entryX=0.3;entryY=0;")
     p.edge("e-c-repo", "grp-children", "repo", "chunk commits", "exitX=0.5;exitY=1;entryX=1;entryY=0.5;", points=((990, 485),))
-    p.edge("e-p-rec", "parent", "record", "after the units", "exitX=0.5;exitY=1;entryX=0.5;entryY=0;")
+    p.edge("e-p-rec", "parent", "record", "after the segments", "exitX=0.5;exitY=1;entryX=0.5;entryY=0;")
     p.edge("e-rec", "record", "repo", "metadata commit")
     return p
 
@@ -134,10 +134,10 @@ def two_paths():
     p.box("in-source", tb("Source", "GriddedSource / IndexSource: where the files are, time grid and axes, variables, dataset settings"), CLIENT, 40, 80, 290, 70)
     p.box("in-run", tb("Run request", "Window (start/end or lookback); append / upsert; tiers: references, + data, + overviews; fan-out (max_child_runs)"), CLIENT, 40, 160, 290, 80)
     p.box("in-target", tb("Target storage", "Icechunk storage: bucket and prefix"), CLIENT, 40, 250, 290, 60)
-    p.box("ingest", tb("ingest(...)", "List and select steps → prepare (groups, axes, NOT_EXPECTED) → plan units → run units "
+    p.box("ingest", tb("ingest(...)", "List and select steps → prepare (groups, axes, NOT_EXPECTED) → plan segments → run segments "
                        "(in-process, Prefect, or another runner) → record steps"), ICECHUNK, 420, 120, 560, 120)
     p.box("out-repo", tb("Icechunk repo (spec layout)", "/references, optional /data, /overviews/&lt;factor&gt;; step metadata; CF / GeoZarr attributes"), STORE, 1070, 80, 440, 130)
-    p.box("out-report", tb("Run report", "Units written or failed (retried by the next run)"), ICECHUNK, 420, 260, 560, 50)
+    p.box("out-report", tb("Run report", "Segments written or failed (retried by the next run)"), ICECHUNK, 420, 260, 560, 50)
     for i, src in enumerate(("in-source", "in-run", "in-target")):
         p.edge(f"e-b-in{i}", src, "ingest", "", "exitX=1;exitY=0.5;entryX=0;entryY=0.5;")
     p.edge("e-b-repo", "ingest", "out-repo", "")
@@ -158,7 +158,7 @@ def two_paths():
     p.box("zonal", tb("zonal_means(...)", "Written steps → read plans from the chunk layout → block kernel (cos-latitude area weights) "
                       "→ runner: in-process, Prefect, or Spark mapInArrow"), ICECHUNK, 760, 560, 270, 140)
     p.box("out-batches", tb("Arrow batches", "key, value_time, [reference_time], [member], [lead_time], value"), STORE, 1090, 560, 200, 110)
-    p.box("out-client", tb("Client (hub, fved, fetch package)", "Maps batches to teehr names and units (by window for windowed variables) and writes v1 timeseries through teehr_core.warehouse"),
+    p.box("out-client", tb("Client (hub, fved, fetch package)", "Maps batches to teehr names and segments (by window for windowed variables) and writes v1 timeseries through teehr_core.warehouse"),
           CLIENT, 1310, 545, 210, 140)
     p.edge("e-z-ds-w", "in-ds", "weights", "grid template", "exitX=1;exitY=0.3;entryX=0;entryY=0.3;")
     p.edge("e-z-poly", "in-poly", "weights", "", "exitX=1;exitY=0.5;entryX=0;entryY=0.75;")

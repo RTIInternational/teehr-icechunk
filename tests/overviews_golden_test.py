@@ -27,7 +27,7 @@ from teehr_icechunk.repo_const import (  # noqa: E402
     APPEND_DIM_ATTR, FIXED_DIMS_ATTR, FORECAST_LAYOUT_VERSION, LAYOUT_VERSION_ATTR, TIME_ORIGIN_ATTR, TIME_STEP_ATTR,
 )
 from teehr_icechunk.sources import GriddedSource  # noqa: E402
-from teehr_icechunk.units import Unit, UnitResult  # noqa: E402
+from teehr_icechunk.segments import Segment, SegmentResult  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ORIGIN, DAY = pd.Timestamp("2000-01-01"), pd.Timedelta("1D")
@@ -50,33 +50,33 @@ def _local_repo(tmp_path):
 
 
 class ChildRunner:
-    """What ``PrefectRunner`` does, in threads: each unit runs from its JSON parameters through ``run_unit``, two at
-    once, committing side by side. ``kill`` units fail before writing anything."""
+    """What ``PrefectRunner`` does, in threads: each segment runs from its JSON parameters through ``run_segment``, two at
+    once, committing side by side. ``kill`` segments fail before writing anything."""
 
     def __init__(self, model, kill=()):
         self.model, self.kill = model, kill
 
-    def run(self, work, units, on_done=None):
-        def one(unit):
-            if unit in self.kill:
-                return UnitResult(unit, "killed")
-            params = json.loads(json.dumps(work.parameters(unit)))
-            ic_prefect.run_unit(self.model.model_validate(params["args"]), params["unit"], params.get("window"), params["stage"])
-            return UnitResult(unit)
+    def run(self, work, segments, on_done=None):
+        def one(segment):
+            if segment in self.kill:
+                return SegmentResult(segment, "killed")
+            params = json.loads(json.dumps(work.parameters(segment)))
+            ic_prefect.run_segment(self.model.model_validate(params["args"]), params["segment"], params.get("window"), params["stage"])
+            return SegmentResult(segment)
 
         with ThreadPoolExecutor(2) as pool:
-            results = list(pool.map(one, units))
+            results = list(pool.map(one, segments))
         for result in results:
             on_done(result)
         return results
 
 
 class KilledParent:
-    """Runs the first unit, records it, then dies, as a parent hitting its timeout would."""
+    """Runs the first segment, records it, then dies, as a parent hitting its timeout would."""
 
-    def run(self, work, units, on_done=None):
-        work(units[0])
-        on_done(UnitResult(units[0]))
+    def run(self, work, segments, on_done=None):
+        work(segments[0])
+        on_done(SegmentResult(segments[0]))
         raise TimeoutError("parent killed")
 
 
@@ -189,14 +189,14 @@ def test_analysis_overviews_match_golden(tmp_path):
 
 
 def test_fanned_out_overviews_match_golden_and_a_killed_unit_is_redone(tmp_path, monkeypatch):
-    """Units of one shard as concurrent child runs store the same overviews; a killed unit's steps stay unwritten
+    """Segments of one shard as concurrent child runs store the same overviews; a killed segment's steps stay unwritten
     (the run fails) until the next run builds them."""
     repo, src, prefix = _local_repo(tmp_path)
-    args = _analysis_args(prefix, unit_steps=4)
+    args = _analysis_args(prefix, segment_steps=4)
     runner = ChildRunner(type(args))
     _write_days(repo, src, prefix, args, DAYS[[9, 0, 1, 2, 3, 4, 6, 7, 8, 10, 11]], MODIFIED)
-    killed = Unit(DAYS[4], DAYS[7])
-    with pytest.raises(RuntimeError, match="1 of 3 unit"):
+    killed = Segment(DAYS[4], DAYS[7])
+    with pytest.raises(RuntimeError, match="1 of 3 segment"):
         _build_overviews(repo, args, ChildRunner(type(args), kill=[killed]), monkeypatch)
     status = tg.read_step_metadata(repo.readonly_session("main").store, "overviews/2", "time")["status"]
     assert (status.loc[killed.start:killed.end] == tg.UNWRITTEN).all() and (status.loc[DAYS[[0, 8, 11]]] == 2).all()
@@ -204,16 +204,16 @@ def test_fanned_out_overviews_match_golden_and_a_killed_unit_is_redone(tmp_path,
     _write_days(repo, src, prefix, args, DAYS[[3, *range(12, 20)]], MODIFIED + DAY)
     _build_overviews(repo, args, runner, monkeypatch)
     _check_golden(_snapshot(repo), "overviews_analysis_golden.json")
-    # Units keep to the shards the levels were created with, whatever a later run's settings
+    # Segments keep to the shards the levels were created with, whatever a later run's settings
     store = repo.readonly_session("main").store
     other = _analysis_args(prefix, num_shard_chunks=6, time_batch_size=6)
     assert overviews._stored_shard_steps(store, overviews.read_grid_spec(store), other) == 4
 
 
-def test_a_killed_parent_keeps_its_finished_units(tmp_path):
-    """Each unit's steps are recorded as it finishes, so a parent that dies part-way doesn't redo them."""
+def test_a_killed_parent_keeps_its_finished_segments(tmp_path):
+    """Each segment's steps are recorded as it finishes, so a parent that dies part-way doesn't redo them."""
     repo, src, prefix = _local_repo(tmp_path)
-    args = _analysis_args(prefix, unit_steps=4)
+    args = _analysis_args(prefix, segment_steps=4)
     _write_days(repo, src, prefix, args, DAYS[[9, 0, 1, 2, 3, 4, 6, 7, 8, 10, 11]], MODIFIED)
     with pytest.raises(TimeoutError):
         _build_overviews(repo, args, KilledParent())
@@ -269,12 +269,12 @@ def _write_forecast(repo, ds):
 @pytest.mark.parametrize("fan_out", [False, True])
 def test_forecast_overviews_match_golden(tmp_path, monkeypatch, fan_out):
     """Two runs: a partial cycle and a whole one, then the rest of the partial cycle and a new one; one cycle per
-    unit when fanned out."""
+    segment when fanned out."""
     repo, _, _ = _local_repo(tmp_path)
     args = BuildOverviewsDataInput(
         configuration_name="golden", dest_bucket="b", base_prefix="p", num_shard_chunks=2, time_batch_size=4,
         overview_factors=[2], overview_encoding={"RAINRATE": PackedEncoding(dtype="uint16", max_value=0.8, units="mm s^-1")},
-        unit_steps=1,
+        segment_steps=1,
     )
     runner = ChildRunner(BuildOverviewsDataInput) if fan_out else None
     _write_forecast(repo, _forecast_block(CYCLES[[1]], [0], [2, 3]))

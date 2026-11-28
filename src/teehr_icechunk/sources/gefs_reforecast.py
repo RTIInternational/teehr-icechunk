@@ -37,7 +37,7 @@ BUCKET = "noaa-gefs-retrospective"
 PREFIX = "GEFSv12/reforecast"
 # Requests in flight while listing and reading indexes; they are small and latency-bound
 IO_THREADS = 64
-# Back off from 1 s, not obstore's 100 ms: many units reading at once get throttled (503 SlowDown), and
+# Back off from 1 s, not obstore's 100 ms: many segments reading at once get throttled (503 SlowDown), and
 # the retries then spread over tens of seconds within the 3 minute retry timeout
 RETRY_CONFIG = {"backoff": {"init_backoff": timedelta(seconds=1)}}
 # Messages reset their windows at multiples of this many hours

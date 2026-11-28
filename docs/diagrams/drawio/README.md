@@ -18,7 +18,7 @@ The pages show the **target design**, not only what's implemented today; the pla
 1. **Two paths: inputs and outputs.** Repo building (a source, a run request and target storage in; a spec repo and a run report out) and zonal statistics (a dataset, polygons and a selection in; weights and Arrow batches out, which clients map and write to the warehouse), joined by the read layer.
 2. **Package boundaries.** What teehr-icechunk holds (repo building, reading, zonal statistics) and what it doesn't: the client deployments, teehr-cloud-core, the planned fetch package and the warehouse, with arrows pointing at what each depends on or reads.
 3. **Repo layout.** The groups (`/references` → `/data` → `/overviews/<factor>`), dims, per-step metadata and root attributes that `spec/gridded-repo-contract.md` defines.
-4. **Gridded workflow.** List and select, prepare, plan units, run them (in-process or as child runs), record steps; a unit's stages; the readers.
+4. **Gridded workflow.** List and select, prepare, plan segments, run them (in-process or as child runs), record steps; a segment's stages; the readers.
 5. **Run model and fan-out.** The parent, the in-process and Prefect runners, child runs committing chunks with rebase, and the parent's metadata commit.
 
 ### Previews

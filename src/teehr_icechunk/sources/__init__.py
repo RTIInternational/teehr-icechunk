@@ -104,14 +104,14 @@ class GriddedSource(BaseModel, ABC):
 
 
 class ReferenceSource(GriddedSource):
-    """A source whose references are written on the run model (``ref_ingest``): in units, each listing its files,
+    """A source whose references are written on the run model (``ref_ingest``): in segments, each listing its files,
     building a reference table from them and writing it, in the parent or fanned out as child runs.
 
     The source lists its files, turns them into steps and builds a reference table (``refs.REF_COLUMNS`` indexed by
     step) from them; ``template`` gives the empty virtual arrays to create the repo from.
     """
 
-    # Steps per manifest split when the repo is created; units hold whole splits. None leaves manifests unsplit
+    # Steps per manifest split when the repo is created; segments hold whole splits. None leaves manifests unsplit
     manifest_split_steps: ClassVar[int | None] = None
 
     @abstractmethod

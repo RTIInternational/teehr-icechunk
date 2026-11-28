@@ -15,8 +15,8 @@ from teehr_icechunk.grid_spec import GridSpec, read_grid_spec
 from teehr_icechunk.models import BuildOverviewsDataInput, OVERVIEW_CHUNK_SIZE
 from teehr_icechunk.packed_encoding import PackedEncoding
 from teehr_icechunk.repo_const import OVERVIEW_GROUP_PATH, STATUS_COORD, VALUE_TIME
-from teehr_icechunk.units import (
-    InProcessRunner, Runner, Unit, UnitResult, commit_rebasing, commit_unit, plan_units, raise_failed, unit_slots,
+from teehr_icechunk.segments import (
+    InProcessRunner, Runner, Segment, SegmentResult, commit_rebasing, commit_segment, plan_segments, raise_failed, segment_slots,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ def open_repo(args: BuildOverviewsDataInput) -> ic.Repository:
 
 def build_overviews(
     args: BuildOverviewsDataInput, runner: Runner | None = None, repo: ic.Repository | None = None
-) -> list[UnitResult]:
+) -> list[SegmentResult]:
     """Build map overviews for the steps the data group changed, and write them into their slots.
 
     Reads the repo's data group (``/data``, or ``/references`` when not materialized), only the
@@ -44,9 +44,9 @@ def build_overviews(
     server uses the data group as full resolution and the overviews as coarser levels, and
     reprojects each tile on request.
 
-    Runs on the run model: the levels are prepared here, units of whole shards build them (in this process, or
-    as child runs through ``runner``), and each unit's steps are recorded here as it succeeds. Returns each
-    unit's outcome; a failed unit is retried by the next run.
+    Runs on the run model: the levels are prepared here, segments of whole shards build them (in this process, or
+    as child runs through ``runner``), and each segment's steps are recorded here as it succeeds. Returns each
+    segment's outcome; a failed segment is retried by the next run.
 
     Parameters
     ----------
@@ -76,13 +76,13 @@ def build_overviews(
     blocks = [] if spec.fixed_dims else [_stored_shard_steps(store, spec, args)]
     split = getattr(getattr(args, "source", None), "manifest_split_steps", None)
     times = stale.get_level_values(dim) if isinstance(stale, pd.MultiIndex) else stale
-    units = plan_units(times, origin, time_step, unit_slots(args.unit_steps, *blocks, *([split] if split else [])))
-    logger.info(f"Building overviews for {len(stale)} step(s) in {len(units)} unit(s).")
+    segments = plan_segments(times, origin, time_step, segment_slots(args.segment_steps, *blocks, *([split] if split else [])))
+    logger.info(f"Building overviews for {len(stale)} step(s) in {len(segments)} segment(s).")
 
-    def record(result: UnitResult) -> None:
+    def record(result: SegmentResult) -> None:
         if result.error is not None:
             return
-        done = result.unit.select(stale, dim)
+        done = result.segment.select(stale, dim)
         if len(done) == 0:
             return
         meta = data_meta.loc[done]
@@ -95,16 +95,16 @@ def build_overviews(
                 source_last_modified=meta["source_last_modified"].to_numpy(),
                 updated_at=meta["updated_at"].to_numpy(),
             )
-        commit_rebasing(session, f"Recorded {len(done)} overview step(s), {result.unit.start} to {result.unit.end}")
+        commit_rebasing(session, f"Recorded {len(done)} overview step(s), {result.segment.start} to {result.segment.end}")
 
-    results = (runner or InProcessRunner()).run(OverviewWork(repo, args), units, on_done=record)
+    results = (runner or InProcessRunner()).run(OverviewWork(repo, args), segments, on_done=record)
     raise_failed(results)
     return results
 
 
 @dataclass
 class OverviewWork:
-    """One unit's overviews: its stale steps, read and averaged in batches of whole shards, written and committed.
+    """One segment's overviews: its stale steps, read and averaged in batches of whole shards, written and committed.
 
     Runs in the parent (``InProcessRunner``) or in a child run rebuilt from ``parameters``.
     """
@@ -112,13 +112,13 @@ class OverviewWork:
     repo: ic.Repository
     args: BuildOverviewsDataInput
 
-    def __call__(self, unit: Unit) -> None:
+    def __call__(self, segment: Segment) -> None:
         args = self.args
         store = self.repo.readonly_session("main").store
         spec = read_grid_spec(store)
         dim = spec.append_dim
         data_meta = tg.read_step_metadata(store, spec.data_group, dim)
-        stale = unit.select(_stale_steps(store, spec, data_meta, args), dim)
+        stale = segment.select(_stale_steps(store, spec, data_meta, args), dim)
         if len(stale) == 0:
             return
         data_ds = _data_dataset(store, spec, args)
@@ -142,11 +142,11 @@ class OverviewWork:
                 f"Processed overview batch {i} of {len(batches)} ({len(batch)} step(s)) "
                 f"in {time.perf_counter() - batch_started:.1f}s."
             )
-        commit_unit(session, f"Overviews for {len(stale)} step(s), {unit.start} to {unit.end}")
+        commit_segment(session, f"Overviews for {len(stale)} step(s), {segment.start} to {segment.end}")
         logger.info(f"Built overviews for {len(stale)} step(s) in {time.perf_counter() - started:.1f}s.")
 
-    def parameters(self, unit: Unit) -> dict:
-        return {"stage": "overviews", "args": self.args.model_dump(mode="json"), "unit": unit.to_dict()}
+    def parameters(self, segment: Segment) -> dict:
+        return {"stage": "overviews", "args": self.args.model_dump(mode="json"), "segment": segment.to_dict()}
 
 
 def _stale_steps(store: ic.IcechunkStore, spec: GridSpec, data_meta: pd.DataFrame, args: BuildOverviewsDataInput) -> pd.Index:
@@ -184,7 +184,7 @@ def _data_dataset(store: ic.IcechunkStore, spec: GridSpec, args: BuildOverviewsD
 def _prepare(
     repo: ic.Repository, spec: GridSpec, data_ds: xr.Dataset, data_meta: pd.DataFrame, args: BuildOverviewsDataInput
 ) -> None:
-    """Create each overview level (or extend its axis to the data group's), in one commit, so units only write chunks."""
+    """Create each overview level (or extend its axis to the data group's), in one commit, so segments only write chunks."""
     dim = spec.append_dim
     session = repo.writable_session("main")
     _, origin, time_step = tg.read_grid(session.store)

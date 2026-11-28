@@ -18,7 +18,7 @@ from teehr_icechunk.data_status import with_status
 from teehr_icechunk.models import IngestGriddedDataInput
 from teehr_icechunk.repo_const import LEAD_TIME, NOT_EXPECTED, REFERENCE_TIME, STATUS_COORD, UNWRITTEN
 from teehr_icechunk.sources import IndexSource, ParsedSource, listing_frame
-from teehr_icechunk.units import UnitResult
+from teehr_icechunk.segments import SegmentResult
 
 ORIGIN = pd.Timestamp("2000-01-01")
 SHAPE = (2, 3)
@@ -127,8 +127,8 @@ def _read(open_repo):
 def test_references_land_and_metadata_covers_only_the_window(setup):
     repo, args, open_repo = setup
     results = ref_ingest.ingest_references(args, pd.Timestamp("2000-01-03"), pd.Timestamp("2000-01-14"), repo=repo,
-                                             unit_steps=1)
-    assert len(results) == 2  # units of 10 cycles (the manifest split): Jan 1-10 and Jan 11-20
+                                             segment_steps=1)
+    assert len(results) == 2  # segments of 10 cycles (the manifest split): Jan 1-10 and Jan 11-20
     ds, meta = _read(open_repo)
     assert ds["v"].sel({REFERENCE_TIME: "2000-01-04", LEAD_TIME: 2}).values.tolist() == [[42.0] * 3] * 2
     assert ds[REFERENCE_TIME].values[-1] == np.datetime64("2000-01-14")  # the axis ends with the window
@@ -148,9 +148,9 @@ def test_a_failed_unit_leaves_its_steps_for_the_next_run(setup, monkeypatch):
         return real(self, files, args, stored)
 
     monkeypatch.setattr(FakeIndexSource, "reference_table", flaky)
-    with pytest.raises(RuntimeError, match="1 of 2 unit"):
+    with pytest.raises(RuntimeError, match="1 of 2 segment"):
         ref_ingest.ingest_references(args, pd.Timestamp("2000-01-03"), pd.Timestamp("2000-01-14"), repo=repo,
-                                       unit_steps=1)
+                                       segment_steps=1)
     _, meta = _read(open_repo)
     cycles = meta.index.get_level_values(REFERENCE_TIME)
     assert (meta[(cycles >= "2000-01-03") & (cycles <= "2000-01-10")][STATUS_COORD] != UNWRITTEN).all()
@@ -158,8 +158,8 @@ def test_a_failed_unit_leaves_its_steps_for_the_next_run(setup, monkeypatch):
 
     monkeypatch.setattr(FakeIndexSource, "reference_table", real)
     results = ref_ingest.ingest_references(args, pd.Timestamp("2000-01-03"), pd.Timestamp("2000-01-14"), repo=repo,
-                                             unit_steps=1)
-    assert [r.unit.start for r in results] == [pd.Timestamp("2000-01-11")]
+                                             segment_steps=1)
+    assert [r.segment.start for r in results] == [pd.Timestamp("2000-01-11")]
     ds, _ = _read(open_repo)
     assert ds["v"].sel({REFERENCE_TIME: "2000-01-12", LEAD_TIME: 2}).values[0, 0] == 122.0
 
@@ -233,7 +233,7 @@ def parsed(tmp_path):
                                     authorize_virtual_chunk_access={prefix: ic.credentials.LocalFileSystemAccess})
 
     args = ParsedInput(source={"type": "parsed", "folder": str(src)}, dest_bucket="b", base_prefix="p",
-                       fallback_source_crs="EPSG:5070", unit_steps=4)
+                       fallback_source_crs="EPSG:5070", segment_steps=4)
     return src, args, new_repo
 
 
@@ -242,7 +242,7 @@ def _repo_snapshot(repo) -> dict:
     store = repo.readonly_session("main").store
     root = zarr.open_group(store, mode="r", zarr_format=3)
     # The group's coordinates list is left out: the one-commit path's region writes cut it to the step metadata,
-    # where units keep the full list the group was created with (as index sources do)
+    # where segments keep the full list the group was created with (as index sources do)
     group_attrs = {k: v for k, v in root["references"].attrs.items() if k != "coordinates"}
     snap = {"/": dict(root.attrs), "references": group_attrs}
     for name, arr in root["references"].arrays():
@@ -253,7 +253,7 @@ def _repo_snapshot(repo) -> dict:
 
 
 def test_parsed_references_match_the_one_commit_path(parsed):
-    """References written by units (one row per HDF5 tile) store exactly what the one-commit path stored; a missing
+    """References written by segments (one row per HDF5 tile) store exactly what the one-commit path stored; a missing
     or unreadable file leaves its step unwritten."""
     src, args, new_repo = parsed
     start, end = pd.Timestamp("2000-01-02"), pd.Timestamp("2000-01-12")
@@ -265,8 +265,8 @@ def test_parsed_references_match_the_one_commit_path(parsed):
     ingest.record_data_group(old, "/references")
 
     new = new_repo("new")
-    results = ref_ingest.ingest_references(args, start, end, repo=new, unit_steps=args.unit_steps)
-    assert len(results) == 3  # units of 4 days from the origin
+    results = ref_ingest.ingest_references(args, start, end, repo=new, segment_steps=args.segment_steps)
+    assert len(results) == 3  # segments of 4 days from the origin
     assert _repo_snapshot(new) == _repo_snapshot(old)
     meta = tg.read_step_metadata(new.readonly_session("main").store, "/references", "time")
     assert meta.loc[["2000-01-05", "2000-01-08"], STATUS_COORD].tolist() == [UNWRITTEN, UNWRITTEN]
@@ -274,7 +274,7 @@ def test_parsed_references_match_the_one_commit_path(parsed):
     assert v.sel(time="2000-01-09").values[3, 5] == 900 + 23
 
 
-def test_a_file_laid_out_unlike_the_repo_fails_its_unit(parsed):
+def test_a_file_laid_out_unlike_the_repo_fails_its_segment(parsed):
     src, args, new_repo = parsed
     repo = new_repo("repo")
     ref_ingest.ingest_references(args, pd.Timestamp("2000-01-02"), pd.Timestamp("2000-01-04"), repo=repo)
@@ -284,7 +284,7 @@ def test_a_file_laid_out_unlike_the_repo_fails_its_unit(parsed):
 
 
 def test_a_file_published_after_the_listing_waits_for_the_next_run(parsed, monkeypatch):
-    """A unit lists its files again; one past the axis the parent prepared is left for the next run."""
+    """A segment lists its files again; one past the axis the parent prepared is left for the next run."""
     src, args, new_repo = parsed
     repo = new_repo("repo")
     real = FakeParsedSource.list_files
@@ -304,7 +304,7 @@ def test_a_file_published_after_the_listing_waits_for_the_next_run(parsed, monke
     assert meta.loc["2000-01-04", STATUS_COORD] >= 0
 
 
-def test_a_written_step_whose_newer_file_cant_be_read_fails_its_unit(parsed):
+def test_a_written_step_whose_newer_file_cant_be_read_fails_its_segment(parsed):
     """Upsert would otherwise record the newer file while the older references stay, never to be retried."""
     src, args, new_repo = parsed
     repo = new_repo("repo")
@@ -321,21 +321,21 @@ def test_a_written_step_whose_newer_file_cant_be_read_fails_its_unit(parsed):
     assert after.loc["2000-01-03", "source_last_modified"] == before.loc["2000-01-03", "source_last_modified"]
 
 
-class OnlyMiddleUnit:
-    """Runs the middle unit and reports the others as failed."""
+class OnlyMiddleSegment:
+    """Runs the middle segment and reports the others as failed."""
 
-    def run(self, work, units, on_done=None):
-        results = [UnitResult(u, "not run") for u in units]
-        work(units[1])
-        results[1] = UnitResult(units[1])
+    def run(self, work, segments, on_done=None):
+        results = [SegmentResult(u, "not run") for u in segments]
+        work(segments[1])
+        results[1] = SegmentResult(segments[1])
         for result in results:
             on_done(result)
         return results
 
 
 def test_a_unit_writes_only_its_own_slots(parsed, monkeypatch):
-    """A source may list files beyond a unit's slots (e.g. NWM selects by cycle, two hours after the valid time);
-    a unit writes only its own steps, so steps never fall between units or land unrecorded in a neighbour's."""
+    """A source may list files beyond a segment's slots (e.g. NWM selects by cycle, two hours after the valid time);
+    a segment writes only its own steps, so steps never fall between segments or land unrecorded in a neighbour's."""
     src, args, new_repo = parsed
     repo = new_repo("repo")
     real = FakeParsedSource.list_files
@@ -344,12 +344,12 @@ def test_a_unit_writes_only_its_own_slots(parsed, monkeypatch):
         return real(self, pd.Timestamp(start_dt) - pd.Timedelta("2D"), pd.Timestamp(end_dt) + pd.Timedelta("2D"))
 
     monkeypatch.setattr(FakeParsedSource, "list_files", wider)
-    with pytest.raises(RuntimeError, match="2 of 3 unit"):
+    with pytest.raises(RuntimeError, match="2 of 3 segment"):
         ref_ingest.ingest_references(args, pd.Timestamp("2000-01-04"), pd.Timestamp("2000-01-10"), repo=repo,
-                                     runner=OnlyMiddleUnit(), unit_steps=args.unit_steps)
+                                     runner=OnlyMiddleSegment(), segment_steps=args.segment_steps)
     session = repo.readonly_session("main")
     days = pd.date_range("2000-01-02", "2000-01-12", name="time")
     present = days[tg.present_steps(session, "/references", "v", days)]
-    assert list(present.strftime("%d")) == ["06", "07"]  # the middle unit is Jan 5-8; the 5th and 8th have no file
+    assert list(present.strftime("%d")) == ["06", "07"]  # the middle segment is Jan 5-8; the 5th and 8th have no file
     meta = tg.read_step_metadata(session.store, "/references", "time")
     assert list(meta.index[meta[STATUS_COORD] >= 0].strftime("%d")) == ["06", "07"]
