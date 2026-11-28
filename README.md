@@ -22,7 +22,8 @@ Extras add file formats and features:
 | `[hdf]` | NetCDF / HDF5 / Zarr sources |
 | `[tiff]` | GeoTIFF sources |
 | `[grib]` | GRIB2 sources (also needed to read GRIB-backed datasets) |
-| `[mean-areal]` | zonal statistics (mean areal values) |
+| `[mean-areal]` | zonal statistics (`teehr_icechunk.zonal`): polygon coverage weights on a grid, and mean areal values staged as Parquet |
+| `[prefect]` | running segments of a job as Prefect child flow runs (fan-out across pods) |
 | `[all]` | all of the above |
 
 The base install has no workflow orchestrator, teehr or Spark dependency.

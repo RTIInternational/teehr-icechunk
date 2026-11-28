@@ -38,9 +38,9 @@ hdf = ["h5py>=3.12"]
 tiff = ["virtual-tiff>=0.5,<0.6"]
 # Building and reading GRIB2-backed datasets.
 grib = ["gribberish>=1.8,<2"]
-# Zonal statistics (mean areal values).
-mean-areal = ["scipy>=1.14", "pyarrow>=21"]
-# Fan-out of units as Prefect child flow runs (teehr_icechunk.prefect).
+# Zonal statistics: coverage weights of polygons on a grid, and mean areal values.
+mean-areal = ["scipy>=1.14", "pyarrow>=21", "geopandas>=1.1,<2", "shapely>=2.1,<3", "exactextract>=0.3,<1"]
+# Fan-out of segments as Prefect child flow runs (teehr_icechunk.prefect).
 prefect = ["prefect>=3.4,<4"]
 all = ["teehr-icechunk[hdf,tiff,grib,mean-areal]"]
 
@@ -50,7 +50,6 @@ Repository = "https://github.com/RTIInternational/teehr-icechunk"
 [dependency-groups]
 dev = [
     "cf-xarray>=0.10",  # readers such as xpublish-edr find the time axis with it
-    "cloudpickle>=3",  # the mean areal kernel is shipped to Spark executors by value
     "h5netcdf>=1.4",  # tests write small netCDF sources
     "pytest>=8.3",
     "ruff>=0.8",
