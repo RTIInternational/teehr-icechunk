@@ -1,14 +1,11 @@
 """Mean areal values of a lazily opened grid, read one block at a time.
 
-The flow splits the grid into chunk-aligned blocks of steps and runs ``mean_areal_block`` on each, on the
-Prefect pod or on Spark executors. Only the storage chunks holding weighted pixels are read, one chunk row at a
-time, and means are averaged in slices of steps, which bounds memory.
-
-Spark executors don't have this package, so the mean areal flow sends this module's code (and ``weights``) with
-each task. Keep their imports to libraries the executor image has (no Prefect, teehr or client imports).
+``teehr_icechunk.zonal`` splits the grid into chunk-aligned blocks of steps and runs ``mean_areal_block`` on each in
+worker processes. Only the storage chunks holding weighted pixels are read, one chunk row at a time, and means are
+averaged in slices of steps, which bounds memory.
 """
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterator, Optional, Sequence, Tuple
+from typing import Dict, Iterator, Optional, Tuple
 
 import numpy as np
 import pyarrow as pa
@@ -145,29 +142,6 @@ class BlockTask:
 
     selection: Dict[str, object]
     step_columns: Dict[str, np.ndarray]
-
-
-def run_block_task(task: BlockTask, da: xr.DataArray, weights: GridWeights, **kwargs) -> pa.Table:
-    """``mean_areal_block`` of one task's block of ``da``."""
-    return mean_areal_block(da.isel(task.selection), weights, step_columns=task.step_columns, **kwargs)
-
-
-def arrow_task_runner(
-    tasks: Sequence[BlockTask],
-    da: xr.DataArray,
-    weights: GridWeights,
-    **kwargs,
-) -> Callable[[Iterator[pa.RecordBatch]], Iterator[pa.RecordBatch]]:
-    """A Spark ``mapInArrow`` function running the tasks named by a ``task`` column.
-
-    ``da`` is a lazily opened grid, which pickles with its store (zarr over obstore, or an Icechunk read-only
-    session), so executors read the source directly.
-    """
-    def run(batches: Iterator[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
-        for batch in batches:
-            for i in batch.column("task").to_pylist():
-                yield from run_block_task(tasks[i], da, weights, **kwargs).to_batches()
-    return run
 
 
 def _conform(table: pa.Table, schema: pa.Schema) -> pa.Table:

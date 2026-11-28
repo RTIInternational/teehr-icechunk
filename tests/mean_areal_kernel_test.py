@@ -1,6 +1,4 @@
 """Mean areal values read one grid block at a time, and the Spark task runner shipped to executors."""
-import subprocess
-import sys
 
 import numpy as np
 import pandas as pd
@@ -9,11 +7,8 @@ import pytest
 import xarray as xr
 
 pytest.importorskip("scipy")
-import teehr_icechunk  # noqa: E402
 from teehr_icechunk.weights import build_weights_matrix, weighted_average_from_matrix  # noqa: E402
-from teehr_icechunk.mean_areal_kernel import (  # noqa: E402
-    BlockTask, GridWeights, arrow_task_runner, chunk_reads, mean_areal_block, run_block_task,
-)
+from teehr_icechunk.mean_areal_kernel import GridWeights, chunk_reads, mean_areal_block  # noqa: E402
 
 def _weights(n_rows: int, n_cols: int) -> pd.DataFrame:
     """Three zones over overlapping, partly covered pixels."""
@@ -135,44 +130,3 @@ def test_block_rejects_misaligned_step_columns(lazy_grid):
     weights, _ = _expected(np.zeros((1, 9, 7)), _weights(9, 7), 1.0)
     with pytest.raises(ValueError, match="step_columns"):
         mean_areal_block(da.isel(member=0), weights, "y", "x", step_columns={"value_time": da.time.values[:2]})
-
-
-def test_arrow_task_runner_is_shipped_by_value(lazy_grid, tmp_path):
-    """The mapInArrow function, pickled as the mean areal flow ships it, runs without importing this package.
-
-    Spark executors don't have teehr-icechunk, so the flow registers the package to be pickled by value.
-    """
-    cloudpickle = pytest.importorskip("cloudpickle")
-
-    data, da = lazy_grid
-    weights, _ = _expected(data, _weights(9, 7), 0.5)
-    tasks = [
-        BlockTask(
-            selection={"member": [m], "time": slice(t, t + 3)},
-            step_columns={"value_time": da.time.values[t:t + 3], "member": np.full(3, str(m))},
-        )
-        for m in range(2) for t in (0, 3)
-    ]
-    runner = arrow_task_runner(tasks, da, weights, y_dim="y", x_dim="x", min_coverage=0.5)
-    # As the mean areal flow does
-    cloudpickle.register_pickle_by_value(teehr_icechunk)
-    (tmp_path / "runner.pkl").write_bytes(cloudpickle.dumps(runner))
-
-    child = (
-        "import pickle, sys, pyarrow as pa\n"
-        "runner = pickle.loads(open(sys.argv[1], 'rb').read())\n"
-        "inputs = [pa.record_batch({'task': [0, 1]}), pa.record_batch({'task': [2, 3]})]\n"
-        "pa.parquet.write_table(pa.Table.from_batches(list(runner(iter(inputs)))), sys.argv[2])\n"
-        "assert not any(m.startswith('teehr_icechunk') for m in sys.modules)\n"
-    )
-    subprocess.run(
-        [sys.executable, "-c", "import pyarrow.parquet\n" + child, str(tmp_path / "runner.pkl"),
-         str(tmp_path / "out.parquet")],
-        cwd=tmp_path, check=True,
-    )
-    got = pd.read_parquet(tmp_path / "out.parquet")
-
-    expected = pd.concat([
-        run_block_task(task, da, weights, y_dim="y", x_dim="x", min_coverage=0.5).to_pandas() for task in tasks
-    ], ignore_index=True)
-    pd.testing.assert_frame_equal(got, expected)

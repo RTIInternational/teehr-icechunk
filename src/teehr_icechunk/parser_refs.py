@@ -54,7 +54,7 @@ def reference_table(
     """References to every chunk of ``files`` (one per step), indexed by step; files that can't be read are skipped.
 
     Each file's arrays must be laid out as the ``stored`` ones (shape, chunks, dtype, codecs, fill), so a source
-    that changed its layout fails the unit instead of mixing layouts in one array.
+    that changed its layout fails the segment instead of mixing layouts in one array.
     """
     datasets = _open(source, files["url"].tolist(), args)
     step_dims = list(files.index.names)

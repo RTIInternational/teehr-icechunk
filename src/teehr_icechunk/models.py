@@ -85,7 +85,28 @@ class BaseGriddedDataInput(BaseModel):
     )
 
 
-class BuildOverviewsDataInput(BaseGriddedDataInput):
+class FanOutInput(BaseModel):
+    """How a run on the segment model (``teehr_icechunk.segments``) splits and spreads its work."""
+
+    max_child_runs: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Segments run at once as child flow runs (fan-out across pods); 0 runs every segment in this run"
+        )
+    )
+    segment_steps: int = Field(
+        default=365,
+        gt=0,
+        description="Append-axis slots per segment, rounded up to whole shards and manifest splits"
+    )
+    child_job_variables: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Job variables for child runs (e.g. their resources), overriding the child deployment's"
+    )
+
+
+class BuildOverviewsDataInput(BaseGriddedDataInput, FanOutInput):
     """Input parameters for the build_overviews Prefect flow."""
 
     overview_factors: list[int] = Field(
@@ -126,23 +147,6 @@ class BuildOverviewsDataInput(BaseGriddedDataInput):
         )
     )
 
-    max_child_runs: int = Field(
-        default=0,
-        ge=0,
-        description=(
-            "Units run at once as child flow runs (fan-out across pods); 0 runs every unit in this run. Applies "
-            "to overviews, and to references from sources on the run model"
-        )
-    )
-    unit_steps: int = Field(
-        default=365,
-        gt=0,
-        description="Append-axis slots per unit of work, rounded up to whole shards and manifest splits"
-    )
-    child_job_variables: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Job variables for child runs (e.g. their resources), overriding the child deployment's"
-    )
 
     @field_validator("overview_factors")
     @classmethod

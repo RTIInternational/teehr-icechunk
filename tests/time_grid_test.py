@@ -219,7 +219,7 @@ def test_write_step_metadata_records_only_the_given_steps(repo, source):
 
 
 def test_write_chunks_writes_values_only(repo, source):
-    """A unit's write: values land in their slots, encoded as stored, and no metadata or coordinate changes."""
+    """A segment's write: values land in their slots, encoded as stored, and no metadata or coordinate changes."""
     session = repo.writable_session("main")
 
     def days_ds(days):
@@ -237,7 +237,7 @@ def test_write_chunks_writes_values_only(repo, source):
     tg.write_chunks(session, "data", ds, DIM)
     changed = session.status()
     assert not (changed.updated_arrays or changed.updated_groups) and set(changed.updated_chunks) == {"/data/SWE"}
-    session.commit("unit")
+    session.commit("segment")
     data = xr.open_zarr(repo.readonly_session("main").store, group="data", consolidated=False)
     assert [data.SWE.sel(time=d).values[0, 0] for d in days] == [d.dayofyear for d in days]
     assert data.SWE.isel(time=[0, 1, 4]).isnull().all() and (data.status == tg.UNWRITTEN).all()
